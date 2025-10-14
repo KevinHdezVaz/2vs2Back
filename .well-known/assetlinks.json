@@ -1,0 +1,16 @@
+[
+    {
+      "relation": [
+        "delegate_permission/common.handle_all_urls",
+        "delegate_permission/common.get_login_creds"
+      ],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.app.footconnect0",
+        "sha256_cert_fingerprints": [
+          "61:b5:25:c6:b5:ac:8d:f9:18:50:28:5b:70:c0:a8:ff:8b:f0:46:7e:2d:21:48:4c:3b:bf:e2:5c:55:25:d0:09",
+          "82:64:C7:66:EB:19:7F:B8:C0:5B:47:06:2B:0B:4E:51:06:5F:13:ED:EF:87:BF:0E:A8:38:66:50:E0:82:17:B2"
+        ]
+      }
+    }
+  ]
