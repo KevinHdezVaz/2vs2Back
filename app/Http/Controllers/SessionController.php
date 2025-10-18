@@ -7,6 +7,7 @@ use App\Models\Player;
 use App\Models\Session;
 use Illuminate\Http\Request;
 use App\Services\RatingService;
+use App\Models\Game;
 
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
@@ -24,8 +25,7 @@ class SessionController extends Controller
      * Crear nueva sesión
      */
     
-
-   public function store(Request $request): JsonResponse
+public function store(Request $request): JsonResponse
 {
     \Log::info('Request data received:', $request->all());
     
@@ -38,7 +38,7 @@ class SessionController extends Controller
             'points_per_game' => 'required|integer|in:7,11,15,21',
             'win_by' => 'required|integer|in:1,2',
             'number_of_sets' => 'required|string',
-            'session_type' => 'required|string|in:T,P4,P8',
+            'session_type' => 'required|string|in:T,P4,P8,O',
             'courts' => 'required|array',
             'courts.*.court_name' => 'required|string',
             'players' => 'required|array',
@@ -128,11 +128,111 @@ class SessionController extends Controller
         $player->save();
     }
 
-    \Log::info('Session created successfully:', ['session_id' => $session->id]);
+    \Log::info('Session created, now generating games', ['session_id' => $session->id]);
+
+    // ✅ GENERAR JUEGOS INICIALES
+    try {
+        $games = collect();
+        
+        if ($session->isPlayoff4() || $session->isPlayoff8()) {
+            // Para P4/P8: generar fase regular
+             
+
+            // ✅ CORRECTO
+     $games = $this->gameGenerator->generateAllGames($session); // ← USA ESTE
+
+            Log::info('Regular phase games generated', [
+                'session_id' => $session->id,
+                'session_type' => $session->session_type,
+                'games_count' => $games->count()
+            ]);
+            
+        } elseif ($session->isTournament()) {
+    // ✅ INICIALIZAR current_stage para Tournament
+    $session->current_stage = 1;
+    $session->save();
+    
+    // Para Tournament: generar Stage 1
+    $games = $this->gameGenerator->generateStageGames($session);
+    
+    Log::info('Stage 1 games generated', [
+        'session_id' => $session->id,
+        'current_stage' => $session->current_stage,
+        'games_count' => $games->count()
+    ]);
+            
+        } else {
+            // Para Optimized: generar todos los juegos
+            $games = $this->gameGenerator->generateAllGames($session);
+            
+            Log::info('Optimized games generated', [
+                'session_id' => $session->id,
+                'games_count' => $games->count()
+            ]);
+        }
+
+        // Verificar que se generaron juegos
+        if ($games->isEmpty()) {
+            throw new \Exception('No games were generated');
+        }
+
+        // ✅ Asignar canchas a los primeros N juegos
+        $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
+        
+        Log::info('Assigning courts to initial games', [
+            'available_courts' => $courts->count(),
+            'games_to_assign' => min($courts->count(), $games->count())
+        ]);
+        
+        foreach ($games->take($courts->count()) as $index => $game) {
+            if (isset($courts[$index])) {
+                $game->court_id = $courts[$index]->id;
+                $game->save();
+                
+                Log::info('Court assigned to game', [
+                    'game_id' => $game->id,
+                    'game_number' => $game->game_number,
+                    'court_id' => $courts[$index]->id,
+                    'court_name' => $courts[$index]->court_name
+                ]);
+            }
+        }
+
+        // ✅ Cambiar status a active y establecer started_at
+        $session->status = 'active';
+        $session->started_at = now();
+        $session->save();
+
+        // ✅ Actualizar progreso inicial
+        $session->updateProgress();
+
+        Log::info('Session activated successfully', [
+            'session_id' => $session->id,
+            'status' => $session->status,
+            'started_at' => $session->started_at,
+            'total_games' => $games->count()
+        ]);
+
+    } catch (\Exception $e) {
+        Log::error('Error generating games or activating session', [
+            'session_id' => $session->id,
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        
+        // Rollback: eliminar sesión si falla la generación de juegos
+        $session->courts()->delete();
+        $session->players()->delete();
+        $session->delete();
+        
+        return response()->json([
+            'message' => 'Error generating games: ' . $e->getMessage()
+        ], 500);
+    }
 
     return response()->json([
         'message' => 'Session created successfully',
-        'session' => $session->load(['courts', 'players'])
+        'session' => $session->load(['courts', 'players', 'games'])
     ], 201);
 }
 
@@ -362,30 +462,42 @@ public function getPublicPlayerStats(Session $session): JsonResponse
  */
  
 
-public function start(Session $session): JsonResponse
+public function start(Game $game): JsonResponse
 {
-    if ($session->status !== 'pending') {
+    if ($game->status !== 'pending') {
         return response()->json([
-            'message' => 'La sesión ya fue iniciada'
+            'message' => 'This game has already been started or completed'
         ], 422);
     }
 
-    // Generar juegos según tipo de sesión
-    $games = $this->gameGenerator->generateInitialGames($session);
+    // ✅ BUSCAR LA PRIMERA CANCHA DISPONIBLE (no usar la asignada)
+    $session = $game->session;
+    $availableCourt = $session->courts()
+        ->where('status', 'available')
+        ->orderBy('court_number') // ← Tomar siempre la cancha #1 primero
+        ->first();
 
-    $session->status = 'active';
-    $session->started_at = now();
-    $session->save();
+    if (!$availableCourt) {
+        return response()->json([
+            'message' => 'No courts available. Complete active games first.'
+        ], 422);
+    }
 
-    // COMENTAR FIREBASE (líneas 141-145)
-    // $this->firebaseService->updateSession($session->firebase_id, [
-    //     'status' => 'active',
-    //     'started_at' => $session->started_at->toIso8601String()
-    // ]);
+    // ✅ ASIGNAR LA PRIMERA CANCHA DISPONIBLE (no importa qué cancha tenía antes)
+    $game->court_id = $availableCourt->id;
+    $game->status = 'active';
+    $game->started_at = now();
+    $game->save();
+
+    $availableCourt->status = 'occupied';
+    $availableCourt->save();
+
+    // ✅ REORGANIZAR INMEDIATAMENTE después de iniciar un juego
+    $this->reorganizeGameQueue($session);
 
     return response()->json([
-        'message' => 'Sesión iniciada exitosamente',
-        'games' => $games
+        'message' => 'Game started',
+        'game' => $game->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
     ]);
 }
 
@@ -468,6 +580,7 @@ public function canAdvance(Session $session): JsonResponse
     ]);
 }
 
+
 /**
  * Avanzar al siguiente stage (para torneos)
  */
@@ -506,115 +619,435 @@ public function advanceStage(Session $session): JsonResponse
     $session->current_stage++;
     $session->save();
 
-    // Limpiar cola de partidos anteriores
-    $this->clearPendingGames($session);
+    // ✅ ELIMINAR juegos pendientes (no solo liberar canchas)
+    $pendingCount = $session->games()->where('status', 'pending')->count();
+    if ($pendingCount > 0) {
+        $deletedCount = $session->games()->where('status', 'pending')->delete();
+        
+        Log::info('Pending games DELETED when advancing tournament stage', [
+            'session_id' => $session->id,
+            'from_stage' => $oldStage,
+            'to_stage' => $session->current_stage,
+            'deleted_count' => $deletedCount
+        ]);
+    }
 
     // Generar juegos del nuevo stage
     $games = $this->gameGenerator->generateStageGames($session);
 
-
-     $session->updateRankings();
-
+    // Actualizar rankings
+    $session->updateRankings();
   
     Log::info('Tournament stage advanced', [
         'session_id' => $session->id,
         'from_stage' => $oldStage,
         'to_stage' => $session->current_stage,
-        'games_generated' => $games->count()
+        'games_generated' => $games->count(),
+        'previous_pending_deleted' => $pendingCount
     ]);
 
     return response()->json([
         'message' => "Advanced to Stage {$session->current_stage}",
         'stage' => $session->current_stage,
         'games_generated' => $games->count(),
+        'previous_pending_deleted' => $pendingCount,
         'warning' => 'This action is irreversible. All previous stage games have been cleared from the queue.'
     ]);
 }
 
-/**
- * Limpiar todos los juegos pendientes de la cola
- */
-private function clearPendingGames(Session $session): void
-{
-    $pendingGames = $session->games()
-        ->where('status', 'pending')
-        ->get();
+// En SessionController.php - REEMPLAZAR el método finalizeSession
 
-    foreach ($pendingGames as $game) {
-        $game->court_id = null; // Liberar cancha
-        $game->save();
+public function finalizeSession(Session $session): JsonResponse
+{
+    // Verificar autorización
+    if ($session->user_id !== auth()->id()) {
+        return response()->json(['message' => 'No autorizado'], 403);
     }
 
-    Log::info('Pending games cleared from queue', [
+    // ✅ USAR EL NUEVO MÉTODO: Solo verificar que esté activa
+    if (!$session->isReadyToFinalize()) {
+        return response()->json([
+            'message' => 'Solo sesiones activas pueden ser finalizadas'
+        ], 422);
+    }
+
+    Log::info('Iniciando finalización manual de sesión', [
         'session_id' => $session->id,
-        'games_cleared' => $pendingGames->count()
+        'session_type' => $session->session_type,
+        'pending_games' => $session->games()->where('status', 'pending')->count(),
+        'active_games' => $session->games()->where('status', 'active')->count()
+    ]);
+
+    // ✅ PASO 1: CANCELAR todos los juegos pendientes y activos
+    $pendingGames = $session->games()->whereIn('status', ['pending', 'active'])->get();
+    
+    foreach ($pendingGames as $game) {
+        $game->status = 'cancelled';
+        $game->save();
+        
+        Log::info('Juego cancelado durante finalización', [
+            'game_id' => $game->id,
+            'game_number' => $game->game_number,
+            'previous_status' => $game->getOriginal('status')
+        ]);
+    }
+
+    // ✅ PASO 2: Actualizar rankings finales
+    $session->updateRankings();
+
+    // ✅ PASO 3: Cambiar status a completed
+    $session->status = 'completed';
+    $session->completed_at = now();
+    $session->save();
+
+    // ✅ PASO 4: Preparar datos del podio
+    $podiumData = $this->getPodiumData($session);
+
+    Log::info('Sesión finalizada manualmente', [
+        'session_id' => $session->id,
+        'session_type' => $session->session_type,
+        'games_cancelled' => $pendingGames->count(),
+        'total_completed_games' => $session->games()->where('status', 'completed')->count(),
+        'podium' => $podiumData
+    ]);
+
+    return response()->json([
+        'message' => 'Session finalized successfully',
+        'podium' => $podiumData,
+        'session' => $session,
+        'games_cancelled' => $pendingGames->count()
     ]);
 }
-
-
-
+/**
+ * Obtener datos del podio según tipo de sesión
+ */
+private function getPodiumData(Session $session): array
+{
+    if ($session->isPlayoff8()) {
+        return $this->getP8PodiumData($session);
+    } elseif ($session->isPlayoff4()) {
+        return $this->getP4PodiumData($session);
+    } else {
+        // Optimized: Top 3 jugadores individuales
+        return $this->getOptimizedPodiumData($session);
+    }
+}
 
 /**
- * Avanzar al siguiente stage con validación completa
+ * Podio para P8 (con Bronze Match)
  */
+private function getP8PodiumData(Session $session): array
+{
+    $goldGame = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'gold')
+        ->where('status', 'completed')
+        ->first();
+
+    $bronzeGame = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'bronze')
+        ->where('status', 'completed')
+        ->first();
+
+    if (!$goldGame || !$bronzeGame) {
+        return ['type' => 'incomplete'];
+    }
+
+    $champions = $goldGame->winner_team === 1
+        ? [$goldGame->team1Player1, $goldGame->team1Player2]
+        : [$goldGame->team2Player1, $goldGame->team2Player2];
+
+    $runnersUp = $goldGame->winner_team === 1
+        ? [$goldGame->team2Player1, $goldGame->team2Player2]
+        : [$goldGame->team1Player1, $goldGame->team1Player2];
+
+    $thirdPlace = $bronzeGame->winner_team === 1
+        ? [$bronzeGame->team1Player1, $bronzeGame->team1Player2]
+        : [$bronzeGame->team2Player1, $bronzeGame->team2Player2];
+
+    return [
+        'type' => 'P8',
+        'champions' => [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $champions)
+        ],
+        'second_place' => [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $runnersUp)
+        ],
+        'third_place' => [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $thirdPlace)
+        ]
+    ];
+}
+
 /**
- * Avanzar al siguiente stage con validación completa
+ * Podio para P4 (sin Bronze Match)
  */
+private function getP4PodiumData(Session $session): array
+{
+    $finalGame = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'final')
+        ->where('status', 'completed')
+        ->first();
+
+    if (!$finalGame) {
+        return ['type' => 'incomplete'];
+    }
+
+    $champions = $finalGame->winner_team === 1
+        ? [$finalGame->team1Player1, $finalGame->team1Player2]
+        : [$finalGame->team2Player1, $finalGame->team2Player2];
+
+    $runnersUp = $finalGame->winner_team === 1
+        ? [$finalGame->team2Player1, $finalGame->team2Player2]
+        : [$finalGame->team1Player1, $finalGame->team1Player2];
+
+    return [
+        'type' => 'P4',
+        'champions' => [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $champions)
+        ],
+        'second_place' => [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $runnersUp)
+        ]
+    ];
+}
+
+/**
+ * Podio para Optimized (top 3 individuales)
+ */
+private function getOptimizedPodiumData(Session $session): array
+{
+    $topPlayers = $session->players()
+        ->orderBy('current_rank')
+        ->limit(3)
+        ->get()
+        ->map(fn($p) => [
+            'id' => $p->id,
+            'display_name' => $p->display_name,
+            'rating' => round($p->current_rating, 0),
+            'games_played' => $p->games_played,
+            'win_percentage' => round($p->win_percentage, 1)
+        ]);
+
+    return [
+        'type' => 'O',
+        'top_players' => $topPlayers->toArray()
+    ];
+}
+
+ 
+
 public function advanceToNextStage(Request $request, Session $session): JsonResponse
 {
     try {
-        // Validar que la sesión es P4/P8
-        if (!$session->isPlayoff4() && !$session->isPlayoff8()) {
+        // ✅ VALIDAR: P4/P8 O Tournament
+        if (!$session->isPlayoff4() && !$session->isPlayoff8() && !$session->isTournament()) {
             return response()->json([
                 'success' => false,
-                'error' => 'Solo sesiones P4/P8 pueden avanzar etapas manualmente'
+                'error' => 'Solo sesiones P4/P8/Tournament pueden avanzar etapas'
             ], 400);
         }
 
-        // ✅ Obtener juegos pendientes
-        $pendingGames = $session->games()->where('status', 'pending')->count();
-        $completedGames = $session->games()->where('status', 'completed')->count();
+        $sessionType = $session->session_type;
+        
+        // ========================================
+        // LÓGICA PARA TOURNAMENT (T)
+        // ========================================
+        if ($session->isTournament()) {
+            Log::info('🎯 Iniciando avance a Stage ' . ($session->current_stage + 1), [
+                'session_id' => $session->id,
+                'current_stage' => $session->current_stage,
+            ]);
 
-        Log::info('Iniciando avance a siguiente etapa', [
-            'session_id' => $session->id,
-            'session_type' => $session->session_type,
-            'pending_games' => $pendingGames,
-            'completed_games' => $completedGames
-        ]);
-
-        // ✅ Limpiar juegos pendientes (si los hay)
-        $deletedCount = 0;
-        if ($pendingGames > 0) {
-            $pendingGamesToDelete = $session->games()->where('status', 'pending')->get();
-            $deletedCount = $pendingGamesToDelete->count();
-            
-            foreach ($pendingGamesToDelete as $game) {
-                $game->delete();
+            // ✅ Verificar que no haya juegos activos del stage actual
+            $activeGamesInCurrentStage = $session->games()
+                ->where('stage', $session->current_stage)
+                ->where('status', 'active')
+                ->count();
+                
+            if ($activeGamesInCurrentStage > 0) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No se puede avanzar: hay juegos activos en el stage actual'
+                ], 400);
             }
 
-            Log::info('Juegos pendientes eliminados al avanzar etapa', [
-                'session_id' => $session->id,
-                'pending_deleted' => $deletedCount
+            // ✅ PASO 1: Estado ANTES
+            $beforeState = [
+                'total_games' => $session->games()->count(),
+                'current_stage' => $session->current_stage,
+                'pending_games_current_stage' => $session->games()
+                    ->where('stage', $session->current_stage)
+                    ->where('status', 'pending')
+                    ->count(),
+            ];
+
+            Log::info('📊 Estado ANTES de avanzar stage', $beforeState);
+
+            // ✅ PASO 2: CANCELAR juegos pendientes del stage actual
+            $cancelledGames = $session->games()
+                ->where('stage', $session->current_stage)
+                ->where('status', 'pending')
+                ->get();
+            
+            foreach ($cancelledGames as $game) {
+                $game->status = 'cancelled';
+                $game->court_id = null;
+                $game->save();
+            }
+            
+            Log::info('🗑️ Juegos pendientes cancelados', [
+                'cancelled_count' => $cancelledGames->count()
+            ]);
+
+            // ✅ PASO 3: Actualizar rankings ANTES de avanzar
+$session->updateRankings(); // ← CORREGIDO
+            
+            Log::info('📈 Rankings actualizados después de Stage ' . $session->current_stage, [
+                'top_8_players' => $session->players()
+                    ->orderBy('current_rank')
+                    ->limit(8)
+                    ->get()
+                    ->mapWithKeys(fn($p) => [$p->current_rank => $p->display_name])
+                    ->toArray()
+            ]);
+
+            // ✅ PASO 4: Avanzar al siguiente stage
+            $session->current_stage++;
+            $session->save();
+            
+            Log::info('⬆️ Stage avanzado', [
+                'new_stage' => $session->current_stage
+            ]);
+
+            // ✅ PASO 5: Generar juegos del nuevo stage
+            $newGames = $this->gameGenerator->generateStageGames($session);
+            
+            if ($newGames->isEmpty()) {
+                Log::warning('❌ No se generaron juegos para Stage ' . $session->current_stage);
+                
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No se pudieron generar juegos para el siguiente stage'
+                ], 400);
+            }
+
+            Log::info('✅ Juegos del nuevo stage generados', [
+                'stage' => $session->current_stage,
+                'new_games_count' => $newGames->count()
+            ]);
+
+            // ✅ PASO 6: Actualizar progreso
+            $session->updateProgress();
+
+            // ✅ PASO 7: Estado DESPUÉS
+            $afterState = [
+                'total_games' => $session->games()->count(),
+                'current_stage' => $session->current_stage,
+                'pending_games_new_stage' => $session->games()
+                    ->where('stage', $session->current_stage)
+                    ->where('status', 'pending')
+                    ->count(),
+            ];
+
+            Log::info('✅ Avance a Stage ' . $session->current_stage . ' completado', [
+                'before' => $beforeState,
+                'after' => $afterState,
+                'new_games' => $newGames->count()
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => "Advanced to Stage {$session->current_stage} successfully!",
+                'new_stage' => $session->current_stage,
+                'new_games_count' => $newGames->count(),
+                'cancelled_games' => $cancelledGames->count(),
+                'total_games' => $session->games()->count()
             ]);
         }
 
-        // ✅ Generar siguiente etapa
-        $newGames = $this->gameGenerator->generateNextStageGames($session);
+        // ========================================
+        // LÓGICA PARA PLAYOFFS (P4/P8)
+        // ========================================
+        Log::info('🎯 Iniciando avance a playoffs', [
+            'session_id' => $session->id,
+            'session_type' => $session->session_type,
+        ]);
+
+        // ✅ PASO 1: Contar estado actual ANTES de modificar
+        $beforeState = [
+            'total_games' => $session->games()->count(),
+            'pending_games' => $session->games()->where('status', 'pending')->count(),
+            'active_games' => $session->games()->where('status', 'active')->count(),
+            'completed_games' => $session->games()->where('status', 'completed')->count(),
+            'playoff_games' => $session->games()->where('is_playoff_game', true)->count(),
+        ];
+
+        Log::info('📊 Estado ANTES de eliminar', $beforeState);
+
+        // ✅ PASO 2: ELIMINAR TODOS los juegos que NO estén completed
+        $deletedCount = $session->games()
+            ->whereIn('status', ['pending', 'active'])
+            ->delete();
+
+        Log::info('🗑️ Juegos eliminados', [
+            'deleted_count' => $deletedCount,
+            'remaining_games' => $session->games()->count()
+        ]);
+
+        // ✅ PASO 3: Actualizar rankings ANTES de generar bracket
+        $session->updateRankings();
+
+        Log::info('📈 Rankings actualizados', [
+            'top_8_players' => $session->players()
+                ->orderBy('current_rank')
+                ->limit(8)
+                ->get()
+                ->mapWithKeys(fn($p) => [$p->current_rank => $p->display_name])
+                ->toArray()
+        ]);
+
+        // ✅ PASO 4: Generar bracket de playoffs
+        $newGames = $this->gameGenerator->generatePlayoffBracket($session);
 
         if ($newGames->isEmpty()) {
-            Log::warning('No se generaron nuevos juegos al avanzar etapa', [
-                'session_id' => $session->id,
-                'session_type' => $session->session_type
-            ]);
+            Log::warning('❌ No se generaron juegos de playoff');
             
             return response()->json([
                 'success' => false,
-                'error' => 'No hay más etapas disponibles para avanzar'
+                'error' => 'No se pudieron generar los juegos de playoff'
             ], 400);
         }
 
-        // ✅ 🏟️ ASIGNAR CANCHAS CORRECTAMENTE - SOLO A LOS PRIMEROS JUEGOS
-        $courts = $session->courts;
+        Log::info('✅ Juegos de playoff generados', [
+            'new_games_count' => $newGames->count(),
+            'playoff_rounds' => $newGames->pluck('playoff_round')->unique()->toArray()
+        ]);
+
+        // ✅ PASO 5: ASIGNAR CANCHAS solo a los primeros N juegos
+        $courts = $session->courts()->where('status', 'available')->get();
         $gamesWithCourts = 0;
         
         foreach ($newGames->take($courts->count()) as $index => $game) {
@@ -622,31 +1055,35 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
                 $game->court_id = $courts[$index]->id;
                 $game->save();
                 $gamesWithCourts++;
-                
-                Log::debug('Cancha asignada a juego de playoff', [
-                    'game_id' => $game->id,
-                    'court_id' => $game->court_id,
-                    'playoff_round' => $game->playoff_round
-                ]);
             }
         }
         
-        // ✅ Los juegos restantes quedan SIN cancha (en cola)
+        // Los juegos restantes quedan SIN cancha
         foreach ($newGames->skip($courts->count()) as $game) {
             $game->court_id = null;
             $game->save();
         }
 
-        // ✅ Actualizar progreso de la sesión
+        Log::info('🏟️ Canchas asignadas', [
+            'games_with_courts' => $gamesWithCourts,
+            'games_in_queue' => $newGames->count() - $gamesWithCourts
+        ]);
+
+        // ✅ PASO 6: Actualizar progreso
         $session->updateProgress();
 
-        Log::info('Avance a siguiente etapa completado exitosamente', [
-            'session_id' => $session->id,
-            'new_games_count' => $newGames->count(),
-            'games_with_courts' => $gamesWithCourts,
-            'games_in_queue' => $newGames->count() - $gamesWithCourts,
-            'previous_pending_deleted' => $deletedCount,
-            'total_games_now' => $session->games()->count()
+        // ✅ PASO 7: Estado DESPUÉS
+        $afterState = [
+            'total_games' => $session->games()->count(),
+            'pending_games' => $session->games()->where('status', 'pending')->count(),
+            'completed_games' => $session->games()->where('status', 'completed')->count(),
+            'playoff_games' => $session->games()->where('is_playoff_game', true)->count(),
+        ];
+
+        Log::info('✅ Avance a playoffs completado', [
+            'before' => $beforeState,
+            'after' => $afterState,
+            'new_games' => $newGames->count()
         ]);
 
         return response()->json([
@@ -655,25 +1092,28 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
             'new_games_count' => $newGames->count(),
             'games_with_courts' => $gamesWithCourts,
             'games_in_queue' => $newGames->count() - $gamesWithCourts,
-            'previous_pending_deleted' => $deletedCount,
+            'previous_games_deleted' => $deletedCount,
             'total_games' => $session->games()->count()
         ]);
 
     } catch (\Exception $e) {
-        Log::error('Error advancing to next stage', [
+        Log::error('❌ Error advancing stage', [
             'session_id' => $session->id,
+            'session_type' => $session->session_type,
             'error' => $e->getMessage(),
             'trace' => $e->getTraceAsString()
         ]);
         
         return response()->json([
             'success' => false,
-            'error' => 'Failed to advance stage: ' . $e->getMessage()
+            'error' => 'Failed to advance: ' . $e->getMessage()
         ], 500);
     }
 }
-
-
+ 
+/**
+ * Generar finals de P8 manualmente
+ */
 /**
  * Generar finals de P8 manualmente
  */
@@ -719,12 +1159,36 @@ public function generateP8Finals(Session $session): JsonResponse
         ], 422);
     }
 
+    // Limpiar juegos pending antes de generar finals
+    $pendingCount = $session->games()->where('status', 'pending')->count();
+    if ($pendingCount > 0) {
+        $deletedCount = $session->games()->where('status', 'pending')->delete();
+        
+        Log::info('Pending games deleted before generating P8 finals', [
+            'session_id' => $session->id,
+            'deleted_count' => $deletedCount
+        ]);
+    }
+
     // Generar finals
     $games = $this->gameGenerator->generateP8Finals($session, $semifinals);
 
+    Log::info('P8 finals generated successfully', [
+        'session_id' => $session->id,
+        'games_generated' => $games->count(),
+        'previous_pending_deleted' => $pendingCount
+    ]);
+
+    // ✅ CORREGIDO: Obtener juegos frescos con relaciones
+    $gameIds = $games->pluck('id');
+    $gamesWithRelations = Game::whereIn('id', $gameIds)
+        ->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
+        ->get();
+
     return response()->json([
         'message' => 'Finals generated successfully',
-        'games' => $games->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2'])
+        'games' => $gamesWithRelations,
+        'previous_pending_deleted' => $pendingCount
     ]);
 }
 
@@ -852,41 +1316,8 @@ private function getPlayoffRoundFromLabel(string $label): string
     if (stripos($label, 'Gold') !== false) return 'gold';
     return 'playoff';
 }
-/**
- * Avanzar stage para torneos (Stage 1 → 2 → 3)
- */
-private function advanceTournamentStage(Session $session): JsonResponse
-{
-    if ($session->current_stage >= 3) {
-        return response()->json([
-            'message' => 'All tournament stages have been completed'
-        ], 422);
-    }
 
-    $oldStage = $session->current_stage;
-    $session->current_stage++;
-    $session->save();
 
-    // Limpiar cola de partidos anteriores
-    $this->clearPendingGames($session);
-
-    // Generar juegos del nuevo stage
-    $games = $this->gameGenerator->generateStageGames($session);
-
-    Log::info('Tournament stage advanced', [
-        'session_id' => $session->id,
-        'from_stage' => $oldStage,
-        'to_stage' => $session->current_stage,
-        'games_generated' => $games->count()
-    ]);
-
-    return response()->json([
-        'message' => "Advanced to Stage {$session->current_stage}",
-        'stage' => $session->current_stage,
-        'games_generated' => $games->count(),
-        'warning' => 'This action is irreversible. All previous stage games have been cleared from the queue.'
-    ]);
-}
 
 /**
  * Avanzar a finals para playoffs

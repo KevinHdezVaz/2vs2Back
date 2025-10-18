@@ -195,15 +195,41 @@ private function isPlayoffBlock(string $label): bool
         return null;
     }
 
-  private function assignCourtsToGames(Session $session, Collection $games): void
+
+    public function generateAllGames(Session $session): Collection
 {
-    $courts = $session->courts;
+    return $this->generateInitialGames($session);
+}
+
+private function assignCourtsToGames(Session $session, Collection $games): void
+{
+    $courts = $session->courts()
+        ->where('status', 'available')  // ✅ ASEGURAR que sean available
+        ->get();
+    
+    Log::info('Assigning courts to games', [
+        'session_id' => $session->id,
+        'total_games' => $games->count(),
+        'available_courts' => $courts->count(),
+        'courts_data' => $courts->map(fn($c) => [
+            'id' => $c->id,
+            'name' => $c->court_name,
+            'status' => $c->status
+        ])->toArray()
+    ]);
     
     // ✅ SOLO asignar canchas a los primeros N juegos (donde N = número de canchas)
     foreach ($games->take($courts->count()) as $index => $game) {
         if (isset($courts[$index])) {
             $game->court_id = $courts[$index]->id;
             $game->save();
+            
+            Log::info('Court assigned to game', [
+                'game_id' => $game->id,
+                'game_number' => $game->game_number,
+                'court_id' => $courts[$index]->id,
+                'court_name' => $courts[$index]->court_name
+            ]);
         }
     }
     
@@ -211,8 +237,19 @@ private function isPlayoffBlock(string $label): bool
     foreach ($games->skip($courts->count()) as $game) {
         $game->court_id = null;
         $game->save();
+        
+        Log::debug('Game left in queue', [
+            'game_id' => $game->id,
+            'game_number' => $game->game_number
+        ]);
     }
+    
+    Log::info('Court assignment completed', [
+        'games_with_court' => $games->take($courts->count())->count(),
+        'games_in_queue' => $games->skip($courts->count())->count()
+    ]);
 }
+
 
 public function generateStageGames(Session $session): Collection
 {
@@ -234,7 +271,14 @@ public function generateStageGames(Session $session): Collection
         return collect();
     }
 
-    $players = $this->getRankedPlayers($session);
+    // ✅ CORREGIDO: Para Stage 1, ordenar por ID (orden de creación)
+    // Para Stage 2+, ordenar por ranking
+    if ($session->current_stage === 1) {
+        $players = $session->players()->orderBy('id')->get();
+    } else {
+        $players = $session->players()->orderBy('current_rank')->get();
+    }
+    
     $games = collect();
     
     // Obtener el último game_number y sumar 1
@@ -245,8 +289,12 @@ public function generateStageGames(Session $session): Collection
         'session_id' => $session->id,
         'stage' => $session->current_stage,
         'starting_game_number' => $gameNumber,
-        'players_count' => $players->count()
+        'players_count' => $players->count(),
+        'ordering' => $session->current_stage === 1 ? 'by_id' : 'by_rank'
     ]);
+
+
+    
 
     foreach ($template['blocks'] as $block) {
         $blockStage = $this->getStageFromBlock($block['label']);
@@ -325,6 +373,7 @@ public function generateStageGames(Session $session): Collection
 
  
 
+
 /**
  * Obtener jugador desde notación avanzada (Winner/Loser/R1P#)
  */
@@ -332,8 +381,17 @@ private function getPlayerFromAdvancedNotation(string $notation, Collection $pla
 {
     // Notación de ranking simple (P1, P2, P3...)
     if (preg_match('/^P(\d+)$/', $notation, $matches)) {
-        $rank = (int)$matches[1];
-        return $players->where('current_rank', $rank)->first();
+        $position = (int)$matches[1];
+        
+        // ✅ CORREGIDO: Para Stage 1, usar orden de creación (id)
+        if ($session->current_stage === 1) {
+            // Ordenar por ID (orden de creación) y tomar la posición
+            $sortedPlayers = $players->sortBy('id')->values();
+            return $sortedPlayers->get($position - 1); // -1 porque P1 es índice 0
+        }
+        
+        // ✅ Para Stage 2+, usar ranking actual
+        return $players->where('current_rank', $position)->first();
     }
 
     // Notación de stage anterior (S1P1, S2P3...)
@@ -341,8 +399,8 @@ private function getPlayerFromAdvancedNotation(string $notation, Collection $pla
         $stage = (int)$matches[1];
         $rank = (int)$matches[2];
         
-        // Obtener jugador con ese rank en el stage anterior
-        return $this->getPlayerFromPreviousStageRank($session, $stage, $rank);
+        // Obtener jugador con ese rank del stage anterior
+        return $players->where('current_rank', $rank)->first();
     }
 
     // Notación de winner/loser (Winner of G1, Loser of SF1...)
@@ -356,6 +414,7 @@ private function getPlayerFromAdvancedNotation(string $notation, Collection $pla
     Log::warning('Unknown player notation', ['notation' => $notation]);
     return null;
 }
+
 
 
 

@@ -48,20 +48,7 @@ class Player extends Model
         return $this->first_name . ' ' . $this->last_initial . '.';
     }
 
-    public function updateStats(): void
-    {
-        if ($this->games_played > 0) {
-            $this->win_percentage = ($this->games_won / $this->games_played) * 100;
-        }
-
-        $totalPoints = $this->total_points_won + $this->total_points_lost;
-        if ($totalPoints > 0) {
-            $this->points_won_percentage = ($this->total_points_won / $totalPoints) * 100;
-        }
-
-        $this->save();
-    }
-
+   
     public function getInitialRatingByLevel(): float
     {
         return match($this->level) {
@@ -70,5 +57,26 @@ class Player extends Model
             'Por debajo del promedio' => 800,
             default => 1000
         };
+    }
+
+    /**
+     * Obtener todos los juegos del jugador
+     */
+    public function games()
+    {
+        return Game::where(function ($query) {
+            $query->where('team1_player1_id', $this->id)
+                ->orWhere('team1_player2_id', $this->id)
+                ->orWhere('team2_player1_id', $this->id)
+                ->orWhere('team2_player2_id', $this->id);
+        });
+    }
+
+    /**
+     * Obtener juegos completados del jugador
+     */
+    public function completedGames()
+    {
+        return $this->games()->where('status', 'completed');
     }
 }

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Log; // ← AGREGAR ESTA LÍNEA
 
 class Session extends Model
 {
@@ -62,152 +63,131 @@ class Session extends Model
         return $this->session_type === 'P8';
     }
 
-  // En App\Models\Session
-public function canAdvanceStage(): bool
-{
-    if ($this->isTournament()) {
-        // Verificar que todos los juegos del stage actual estén completos
-        return $this->games()
-            ->where('stage', $this->current_stage)
-            ->where('status', '!=', 'completed')
-            ->count() === 0;
-    }
-    
-    if ($this->isPlayoff4() || $this->isPlayoff8()) {
-        // Verificar que todos los juegos regulares estén completos
-        // Y que no haya juegos de playoff ya generados
-        $regularGamesComplete = $this->games()
-            ->where('is_playoff_game', false)
-            ->where('status', '!=', 'completed')
-            ->count() === 0;
-            
-        $noPlayoffGames = !$this->games()
-            ->where('is_playoff_game', true)
-            ->exists();
-            
-        return $regularGamesComplete && $noPlayoffGames;
-    }
-    
-    return false;
-}
-
-// En App\Models\Session - método updateRankings()
-public function updateRankings(): void
-{
-    // Obtener todos los jugadores con sus estadísticas
-    $players = $this->players()->get();
-
-    // Calcular stats para cada jugador
-    foreach ($players as $player) {
-        $player->updateStats($this->id); // Esto llamará al nuevo calculateStats()
-    }
-
-    // ✅ ORDENAR CON CRITERIOS DE DESEMPATE
-    $rankedPlayers = $players->sortByDesc(function ($player) {
-        return [
-            $player->current_rating ?? 0,
-            $player->win_percentage ?? 0,
-            $player->points_won_percentage ?? 0,
-        ];
-    })->sortBy(function ($player) {
-        return strtolower($player->first_name);
-    })->values();
-
-    // ✅ Asignar ranks
-    $currentRank = 1;
-    $previousRating = null;
-    $previousWinPct = null;
-    $previousPtsPct = null;
-
-    foreach ($rankedPlayers as $index => $player) {
-        // Si los criterios son iguales al anterior, mantener el mismo rank
-        if ($previousRating === $player->current_rating &&
-            $previousWinPct === $player->win_percentage &&
-            $previousPtsPct === $player->points_won_percentage) {
-            // Mismo rank
-        } else {
-            $currentRank = $index + 1;
-        }
-
-        $player->current_rank = $currentRank;
-        $player->save();
-
-        // Guardar valores para comparar con el siguiente
-        $previousRating = $player->current_rating;
-        $previousWinPct = $player->win_percentage;
-        $previousPtsPct = $player->points_won_percentage;
-    }
-}
-
-
-
-public function isFullyCompleted(): bool
-{
-
-      if ($this->isTournament()) {
-        // Si NO está en Stage 3, NO puede estar completado
-        if ($this->current_stage < 3) {
-            return false;
+    public function canAdvanceStage(): bool
+    {
+        if ($this->isTournament()) {
+            // Verificar que todos los juegos del stage actual estén completos
+            return $this->games()
+                ->where('stage', $this->current_stage)
+                ->where('status', '!=', 'completed')
+                ->count() === 0;
         }
         
-        // Si está en Stage 3, verificar que no haya juegos pending/active
+        if ($this->isPlayoff4() || $this->isPlayoff8()) {
+            // Verificar que todos los juegos regulares estén completos
+            // Y que no haya juegos de playoff ya generados
+            $regularGamesComplete = $this->games()
+                ->where('is_playoff_game', false)
+                ->where('status', '!=', 'completed')
+                ->count() === 0;
+                
+            $noPlayoffGames = !$this->games()
+                ->where('is_playoff_game', true)
+                ->exists();
+                
+            return $regularGamesComplete && $noPlayoffGames;
+        }
+        
+        return false;
+    }
+
+// En app/Models/Session.php - REEMPLAZAR el método completo
+public function updateRankings(): void
+{
+    $players = $this->players()->get();
+
+    // ✅ ORDENAMIENTO SIMPLE: Solo por rating descendente
+    $rankedPlayers = $players->sortByDesc('current_rating')->values();
+
+    // ✅ Asignar ranks secuencialmente
+    foreach ($rankedPlayers as $index => $player) {
+        $player->current_rank = $index + 1;
+        $player->save();
+    }
+
+    // ✅ DEBUG opcional
+    Log::info('Rankings simplificados actualizados', [
+        'session_id' => $this->id,
+        'top_3_players' => $rankedPlayers->take(3)->map(function($p) {
+            return [
+                'name' => $p->display_name,
+                'rating' => $p->current_rating,
+                'rank' => $p->current_rank
+            ];
+        })->toArray()
+    ]);
+}
+    
+
+  public function isReadyToFinalize(): bool
+{
+    // Solo sesiones activas pueden finalizarse manualmente
+    return $this->status === 'active';
+}
+    public function isFullyCompleted(): bool
+    {
+        if ($this->isTournament()) {
+            // Si NO está en Stage 3, NO puede estar completado
+            if ($this->current_stage < 3) {
+                return false;
+            }
+            
+            // Si está en Stage 3, verificar que no haya juegos pending/active
+            $pendingActiveGames = $this->games()
+                ->whereIn('status', ['pending', 'active'])
+                ->count();
+            
+            return $pendingActiveGames === 0;
+        }
+
+        // ✅ PARA P8: Verificar que existan Y estén completadas las finals
+        if ($this->isPlayoff8()) {
+            $goldGame = $this->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'gold')
+                ->first();
+                
+            $bronzeGame = $this->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'bronze')
+                ->first();
+            
+            // Si NO existen las finals, NO está completada
+            if (!$goldGame || !$bronzeGame) {
+                return false;
+            }
+            
+            // Si existen pero NO están completadas, NO está completada
+            if ($goldGame->status !== 'completed' || $bronzeGame->status !== 'completed') {
+                return false;
+            }
+        }
+        
+        // ✅ PARA P4: Verificar que exista Y esté completada la final
+        if ($this->isPlayoff4()) {
+            $finalGame = $this->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'final')
+                ->first();
+            
+            // Si NO existe la final, NO está completada
+            if (!$finalGame) {
+                return false;
+            }
+            
+            // Si existe pero NO está completada, NO está completada
+            if ($finalGame->status !== 'completed') {
+                return false;
+            }
+        }
+        
+        // Para todos los casos: verificar que no haya juegos pending/active
         $pendingActiveGames = $this->games()
             ->whereIn('status', ['pending', 'active'])
             ->count();
         
         return $pendingActiveGames === 0;
     }
-
-    // ✅ PARA P8: Verificar que existan Y estén completadas las finals
-    if ($this->isPlayoff8()) {
-        $goldGame = $this->games()
-            ->where('is_playoff_game', true)
-            ->where('playoff_round', 'gold')
-            ->first();
-            
-        $bronzeGame = $this->games()
-            ->where('is_playoff_game', true)
-            ->where('playoff_round', 'bronze')
-            ->first();
-        
-        // Si NO existen las finals, NO está completada
-        if (!$goldGame || !$bronzeGame) {
-            return false;
-        }
-        
-        // Si existen pero NO están completadas, NO está completada
-        if ($goldGame->status !== 'completed' || $bronzeGame->status !== 'completed') {
-            return false;
-        }
-    }
-    
-    // ✅ PARA P4: Verificar que exista Y esté completada la final
-    if ($this->isPlayoff4()) {
-        $finalGame = $this->games()
-            ->where('is_playoff_game', true)
-            ->where('playoff_round', 'final')
-            ->first();
-        
-        // Si NO existe la final, NO está completada
-        if (!$finalGame) {
-            return false;
-        }
-        
-        // Si existe pero NO está completada, NO está completada
-        if ($finalGame->status !== 'completed') {
-            return false;
-        }
-    }
-    
-   // Para todos los casos: verificar que no haya juegos pending/active
-    $pendingActiveGames = $this->games()
-        ->whereIn('status', ['pending', 'active'])
-        ->count();
-    
-    return $pendingActiveGames === 0;
-}
-
-
 
     public function updateProgress(): void
     {
