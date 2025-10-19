@@ -13,6 +13,16 @@ Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 Route::post('/google-login', [AuthController::class, 'googleLogin']);
 
+Route::get('/sessions/code/{code}', [SessionController::class, 'findByCode']);
+
+Route::prefix('public')->middleware('throttle:300,1')->group(function () {
+    Route::get('/sessions/active', [SessionController::class, 'getPublicActiveSessions']);
+    Route::get('/sessions/{session}', [SessionController::class, 'getPublicSession']);
+    Route::get('/sessions/{session}/games/{status}', [SessionController::class, 'getPublicGamesByStatus']);
+    Route::get('/sessions/{session}/players', [SessionController::class, 'getPublicPlayerStats']);
+});
+
+
 // Rutas PÚBLICAS para espectadores
 Route::prefix('public')->middleware('throttle:300,1')->group(function () {
     Route::get('/sessions/active', [SessionController::class, 'getPublicActiveSessions']);

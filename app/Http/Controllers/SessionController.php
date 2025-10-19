@@ -92,6 +92,7 @@ public function store(Request $request): JsonResponse
     // Create in MySQL
     $session = Session::create([
         'firebase_id' => uniqid('session_'),
+        'session_code' => Session::generateUniqueCode(), // ✅ AGREGAR
         'user_id' => $request->user()->id,
         'session_name' => $validated['session_name'],
         'number_of_courts' => $validated['number_of_courts'],
@@ -230,11 +231,45 @@ public function store(Request $request): JsonResponse
         ], 500);
     }
 
-    return response()->json([
+   return response()->json([
         'message' => 'Session created successfully',
-        'session' => $session->load(['courts', 'players', 'games'])
+        'session' => $session->load(['courts', 'players', 'games']),
+        'session_code' => $session->session_code, // ✅ INCLUIR EN RESPUESTA
     ], 201);
 }
+
+// app/Http/Controllers/SessionController.php
+
+/**
+ * Buscar sesión por código (público)
+ */
+public function findByCode(string $code): JsonResponse
+{
+    $session = Session::where('session_code', strtoupper($code))
+        ->where('status', 'active')
+        ->first();
+    
+    if (!$session) {
+        return response()->json([
+            'message' => 'Session not found or not active'
+        ], 404);
+    }
+    
+    $elapsedSeconds = $session->started_at 
+        ? now()->diffInSeconds($session->started_at) 
+        : 0;
+
+    return response()->json([
+        'session' => $session->load([
+            'courts',
+            'players' => function($query) {
+                $query->orderBy('current_rank');
+            },
+        ]),
+        'elapsed_seconds' => $elapsedSeconds
+    ]);
+}
+
 
 public function getHistory(Request $request): JsonResponse
 {

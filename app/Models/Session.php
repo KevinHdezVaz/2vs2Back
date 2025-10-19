@@ -10,6 +10,7 @@ class Session extends Model
 {
     protected $fillable = [
         'firebase_id',
+            'session_code', // ✅ AGREGAR
         'user_id',
         'session_name',
         'number_of_courts',
@@ -62,6 +63,19 @@ class Session extends Model
     {
         return $this->session_type === 'P8';
     }
+
+    public static function generateUniqueCode(): string
+{
+    do {
+        // Generar código: 2 letras + 4 números (sin cero)
+        $letters = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ'), 0, 2));
+        $numbers = substr(str_shuffle('123456789'), 0, 4);
+        $code = $letters . $numbers;
+    } while (self::where('session_code', $code)->exists());
+    
+    return $code;
+}
+
 
     public function canAdvanceStage(): bool
     {
