@@ -204,72 +204,7 @@ private function reorganizeGameQueue(Session $session): void
     /**
      * Actualizar resultado de un juego ya completado
      */
-    public function updateScore(Request $request, Game $game): JsonResponse
-    {
-        // Validar que el juego esté completado
-        if ($game->status !== 'completed') {
-            return response()->json([
-                'message' => 'Solo se pueden editar juegos completados'
-            ], 422);
-        }
-
-        $validated = $request->validate([
-            'team1_score' => 'required|integer|min:0',
-            'team2_score' => 'required|integer|min:0',
-        ]);
-
-        $session = $game->session;
-
-        // Validar que no haya empate
-        if ($validated['team1_score'] === $validated['team2_score']) {
-            return response()->json([
-                'message' => 'No puede haber empate'
-            ], 422);
-        }
-
-        $winnerScore = max($validated['team1_score'], $validated['team2_score']);
-        $loserScore = min($validated['team1_score'], $validated['team2_score']);
-
-        // Validar puntos mínimos
-        if ($winnerScore < $session->points_per_game) {
-            return response()->json([
-                'message' => "El ganador debe tener al menos {$session->points_per_game} puntos"
-            ], 422);
-        }
-
-        // Validar margen de victoria
-        if (($winnerScore - $loserScore) < $session->win_by) {
-            return response()->json([
-                'message' => "Debe ganar por al menos {$session->win_by} punto(s)"
-            ], 422);
-        }
-
-        // Guardar scores antiguos para revertir estadísticas
-        $oldTeam1Score = $game->team1_score;
-        $oldTeam2Score = $game->team2_score;
-        $oldWinnerTeam = $game->winner_team;
-
-        // Actualizar scores
-        $game->team1_score = $validated['team1_score'];
-        $game->team2_score = $validated['team2_score'];
-        $game->winner_team = $validated['team1_score'] > $validated['team2_score'] ? 1 : 2;
-        $game->save();
-
-        // Revertir estadísticas del juego anterior
-        $this->revertPlayerStats($game, $oldTeam1Score, $oldTeam2Score, $oldWinnerTeam);
-
-        // ✅ SOLO usar RatingService ELO para ratings (no updatePlayerStats)
-        $this->ratingService->updateRatings($game);
-
-        // ✅ Actualizar rankings simplificados
-        $game->session->updateRankings();
-
-        return response()->json([
-            'message' => 'Puntaje actualizado exitosamente',
-            'game' => $game->fresh()->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2'])
-        ]);
-    }
-
+ 
     /**
      * Revertir estadísticas de jugadores antes de actualizar
      */
@@ -312,75 +247,171 @@ private function reorganizeGameQueue(Session $session): void
         }
     }
 
-    /**
-     * Registrar resultado de un juego
-     */
-    public function submitScore(Request $request, Game $game): JsonResponse
-    {
+ 
+public function submitScore(Request $request, Game $game): JsonResponse
+{
+    $session = $game->session;
+    
+    // ✅ Validación condicional según Best of 1 o Best of 3
+    if ($session->number_of_sets === '3') {
         $validated = $request->validate([
             'team1_score' => 'required|integer|min:0',
             'team2_score' => 'required|integer|min:0',
-            'team1_sets_won' => 'nullable|integer|min:0',
-            'team2_sets_won' => 'nullable|integer|min:0'
+            'team1_set1_score' => 'required|integer|min:0',
+            'team2_set1_score' => 'required|integer|min:0',
+            'team1_set2_score' => 'required|integer|min:0',
+            'team2_set2_score' => 'required|integer|min:0',
+            'team1_set3_score' => 'nullable|integer|min:0',
+            'team2_set3_score' => 'nullable|integer|min:0',
+            'team1_sets_won' => 'required|integer|min:0|max:3',
+            'team2_sets_won' => 'required|integer|min:0|max:3'
         ]);
-
-        if ($game->status === 'completed') {
-            return response()->json([
-                'message' => 'Este juego ya fue completado'
-            ], 422);
-        }
-
-        $game->team1_score = $validated['team1_score'];
-        $game->team2_score = $validated['team2_score'];
-
-        if (isset($validated['team1_sets_won'])) {
-            $game->team1_sets_won = $validated['team1_sets_won'];
-        }
-        if (isset($validated['team2_sets_won'])) {
-            $game->team2_sets_won = $validated['team2_sets_won'];
-        }
-
-        if (!$game->isScoreValid()) {
-            return response()->json([
-                'message' => 'Score inválido. Verifica las reglas del juego.',
-                'errors' => [
-                    'score' => 'El score no cumple con las reglas configuradas'
-                ]
-            ], 422);
-        }
-
-        $game->winner_team = $game->team1_score > $game->team2_score ? 1 : 2;
-        $game->status = 'completed';
-        $game->completed_at = now();
-        $game->save();
-
-        if ($game->court) {
-            $game->court->status = 'available';
-            $game->court->save();
-        }
-
-        // ✅ SOLO usar RatingService ELO para ratings
-        $this->ratingService->updateRatings($game);
-        
-        // ✅ Actualizar stats básicos SIN ratings
-        $this->updateBasicPlayerStatsFromGame($game);
-
-        // ✅ Actualizar rankings simplificados
-        $game->session->updateRankings();
-
-        $game->session->updateProgress();
-
-             $this->reorganizeGameQueue($game->session);
-
-
-        return response()->json([
-            'message' => 'Resultado registrado exitosamente',
-            'game' => $game->fresh()->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2']),
-            'next_game' => $this->getNextPendingGame($game->session),
-            'session_completed' => false
+    } else {
+        $validated = $request->validate([
+            'team1_score' => 'required|integer|min:0',
+            'team2_score' => 'required|integer|min:0',
         ]);
     }
 
+    if ($game->status === 'completed') {
+        return response()->json([
+            'message' => 'Este juego ya fue completado'
+        ], 422);
+    }
+
+    // Asignar scores
+    $game->team1_score = $validated['team1_score'];
+    $game->team2_score = $validated['team2_score'];
+
+    // ✅ Si es Best of 3, asignar scores de sets
+    if ($session->number_of_sets === '3') {
+        $game->team1_set1_score = $validated['team1_set1_score'];
+        $game->team2_set1_score = $validated['team2_set1_score'];
+        $game->team1_set2_score = $validated['team1_set2_score'];
+        $game->team2_set2_score = $validated['team2_set2_score'];
+        $game->team1_set3_score = $validated['team1_set3_score'] ?? null;
+        $game->team2_set3_score = $validated['team2_set3_score'] ?? null;
+        $game->team1_sets_won = $validated['team1_sets_won'];
+        $game->team2_sets_won = $validated['team2_sets_won'];
+    }
+
+    if (!$game->isScoreValid()) {
+        return response()->json([
+            'message' => 'Score inválido. Verifica las reglas del juego.',
+            'errors' => [
+                'score' => 'El score no cumple con las reglas configuradas'
+            ]
+        ], 422);
+    }
+
+    $game->winner_team = $game->team1_score > $game->team2_score ? 1 : 2;
+    $game->status = 'completed';
+    $game->completed_at = now();
+    $game->save();
+
+    if ($game->court) {
+        $game->court->status = 'available';
+        $game->court->save();
+    }
+
+    // ✅ SOLO usar RatingService ELO para ratings
+    $this->ratingService->updateRatings($game);
+
+    // ✅ Actualizar stats básicos SIN ratings
+    $this->updateBasicPlayerStatsFromGame($game);
+
+    // ✅ Actualizar rankings simplificados
+    $game->session->updateRankings();
+    $game->session->updateProgress();
+
+    $this->reorganizeGameQueue($game->session);
+
+    return response()->json([
+        'message' => 'Resultado registrado exitosamente',
+        'game' => $game->fresh()->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2']),
+        'next_game' => $this->getNextPendingGame($game->session),
+        'session_completed' => false
+    ]);
+}
+
+
+// ✅ TAMBIÉN actualizar el método updateScore() de la misma forma
+public function updateScore(Request $request, Game $game): JsonResponse
+{
+    // Validar que el juego esté completado
+    if ($game->status !== 'completed') {
+        return response()->json([
+            'message' => 'Solo se pueden editar juegos completados'
+        ], 422);
+    }
+
+    $session = $game->session;
+    
+    // ✅ Validación condicional
+    if ($session->number_of_sets === '3') {
+        $validated = $request->validate([
+            'team1_score' => 'required|integer|min:0',
+            'team2_score' => 'required|integer|min:0',
+            'team1_set1_score' => 'required|integer|min:0',
+            'team2_set1_score' => 'required|integer|min:0',
+            'team1_set2_score' => 'required|integer|min:0',
+            'team2_set2_score' => 'required|integer|min:0',
+            'team1_set3_score' => 'nullable|integer|min:0',
+            'team2_set3_score' => 'nullable|integer|min:0',
+            'team1_sets_won' => 'required|integer|min:0|max:3',
+            'team2_sets_won' => 'required|integer|min:0|max:3'
+        ]);
+    } else {
+        $validated = $request->validate([
+            'team1_score' => 'required|integer|min:0',
+            'team2_score' => 'required|integer|min:0',
+        ]);
+    }
+
+    // Guardar scores antiguos para revertir estadísticas
+    $oldTeam1Score = $game->team1_score;
+    $oldTeam2Score = $game->team2_score;
+    $oldWinnerTeam = $game->winner_team;
+
+    // Actualizar scores
+    $game->team1_score = $validated['team1_score'];
+    $game->team2_score = $validated['team2_score'];
+
+    // ✅ Si es Best of 3, actualizar scores de sets
+    if ($session->number_of_sets === '3') {
+        $game->team1_set1_score = $validated['team1_set1_score'];
+        $game->team2_set1_score = $validated['team2_set1_score'];
+        $game->team1_set2_score = $validated['team1_set2_score'];
+        $game->team2_set2_score = $validated['team2_set2_score'];
+        $game->team1_set3_score = $validated['team1_set3_score'] ?? null;
+        $game->team2_set3_score = $validated['team2_set3_score'] ?? null;
+        $game->team1_sets_won = $validated['team1_sets_won'];
+        $game->team2_sets_won = $validated['team2_sets_won'];
+    }
+
+    if (!$game->isScoreValid()) {
+        return response()->json([
+            'message' => 'Score inválido según las reglas del juego',
+        ], 422);
+    }
+
+    $game->winner_team = $validated['team1_score'] > $validated['team2_score'] ? 1 : 2;
+    $game->save();
+
+    // Revertir estadísticas del juego anterior
+    $this->revertPlayerStats($game, $oldTeam1Score, $oldTeam2Score, $oldWinnerTeam);
+
+    // ✅ SOLO usar RatingService ELO para ratings (no updatePlayerStats)
+    $this->ratingService->updateRatings($game);
+
+    // ✅ Actualizar rankings simplificados
+    $game->session->updateRankings();
+
+    return response()->json([
+        'message' => 'Puntaje actualizado exitosamente',
+        'game' => $game->fresh()->load(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2'])
+    ]);
+}
 /**
  * Obtener el juego que debe tener el botón "Start Game" activo
  */

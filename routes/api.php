@@ -58,6 +58,10 @@ Route::middleware(['auth:sanctum', 'throttle:300,1'])->group(function () {
         Route::get('/{session}/stats', [SessionController::class, 'getPlayerStats']);
     });
 
+
+     Route::get('/user/profile', [AuthController::class, 'getProfile']);
+    Route::delete('/user/account', [AuthController::class, 'deleteAccount']);
+    
     // Rutas de juegos
     Route::put('games/{game}/update-score', [GameController::class, 'updateScore']);
     Route::post('games/{game}/skip-to-court', [GameController::class, 'skipToCourt']);

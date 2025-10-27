@@ -28,38 +28,34 @@ class GameGeneratorService
         return $this->generateRandomGames($session);
     }
 
-
-
     /**
- * Validar que la configuración de sesión tiene un template disponible
- */
-public function validateSessionConfiguration(Session $session): array
-{
-    // Validación 1: Mínimo 4 jugadores por cancha
-    $minPlayersRequired = $session->number_of_courts * 4;
-    if ($session->number_of_players < $minPlayersRequired) {
+     * Validar que la configuración de sesión tiene un template disponible
+     */
+    public function validateSessionConfiguration(Session $session): array
+    {
+        // Validación 1: Mínimo 4 jugadores por cancha
+        $minPlayersRequired = $session->number_of_courts * 4;
+        if ($session->number_of_players < $minPlayersRequired) {
+            return [
+                'valid' => false,
+                'message' => "You need at least {$minPlayersRequired} players for {$session->number_of_courts} court(s). Each court requires 4 players minimum."
+            ];
+        }
+
+        // Validación 2: Verificar que existe el template JSON
+        $template = $this->loadTemplate($session);
+        if (!$template) {
+            return [
+                'valid' => false,
+                'message' => "That session configuration has not been created yet. Please try a different combination of players, courts & hours - we will add more options soon!"
+            ];
+        }
+
         return [
-            'valid' => false,
-            'message' => "You need at least {$minPlayersRequired} players for {$session->number_of_courts} court(s). Each court requires 4 players minimum."
+            'valid' => true,
+            'message' => 'Configuration is valid'
         ];
     }
-
-    // Validación 2: Verificar que existe el template JSON
-    $template = $this->loadTemplate($session);
-    if (!$template) {
-        return [
-            'valid' => false,
-            'message' => "That session configuration has not been created yet. Please try a different combination of players, courts & hours - we will add more options soon!"
-        ];
-    }
-
-    return [
-        'valid' => true,
-        'message' => 'Configuration is valid'
-    ];
-}
-
-
 
     private function loadTemplate(Session $session): ?array
     {
@@ -84,92 +80,89 @@ public function validateSessionConfiguration(Session $session): array
         );
     }
 
- 
-
     private function generateFromTemplate(Session $session, array $template): Collection
-{
-    $players = $session->players->keyBy('id')->values();
-    $games = collect();
-    $gameNumber = 1;
+    {
+        $players = $session->players->keyBy('id')->values();
+        $games = collect();
+        $gameNumber = 1;
 
-    // ✅ NUEVO: Para P4/P8, generar SOLO el primer bloque inicialmente
-    foreach ($template['blocks'] as $blockIndex => $block) {
-        // ✅ SOLO generar el PRIMER bloque inicialmente para P4/P8
-        if ($session->isPlayoff4() || $session->isPlayoff8()) {
-            if ($blockIndex > 0) {
-                Log::info('Reservando bloque para avanzar manualmente', [
-                    'label' => $block['label'],
-                    'block_index' => $blockIndex,
-                    'session_type' => $session->session_type
-                ]);
-                continue;
+        // ✅ NUEVO: Para P4/P8, generar SOLO el primer bloque inicialmente
+        foreach ($template['blocks'] as $blockIndex => $block) {
+            // ✅ SOLO generar el PRIMER bloque inicialmente para P4/P8
+            if ($session->isPlayoff4() || $session->isPlayoff8()) {
+                if ($blockIndex > 0) {
+                    Log::info('Reservando bloque para avanzar manualmente', [
+                        'label' => $block['label'],
+                        'block_index' => $blockIndex,
+                        'session_type' => $session->session_type
+                    ]);
+                    continue;
+                }
+            }
+            
+            // Para torneos, mantener lógica existente
+            if ($session->isTournament()) {
+                $blockStage = $this->getStageFromBlock($block['label']);
+                if ($blockStage !== 1) {
+                    Log::info('Saltando stage posterior en generación inicial', [
+                        'label' => $block['label'],
+                        'stage' => $blockStage
+                    ]);
+                    continue;
+                }
+            }
+
+            foreach ($block['rounds'] as $round) {
+                foreach ($round['courts'] as $courtData) {
+                    $teamA = $courtData['A'];
+                    $teamB = $courtData['B'];
+
+                    $team1Player1 = $this->getPlayerFromNotation($teamA[0], $players);
+                    $team1Player2 = $this->getPlayerFromNotation($teamA[1], $players);
+                    $team2Player1 = $this->getPlayerFromNotation($teamB[0], $players);
+                    $team2Player2 = $this->getPlayerFromNotation($teamB[1], $players);
+
+                    if (!$team1Player1 || !$team1Player2 || !$team2Player1 || !$team2Player2) {
+                        continue;
+                    }
+
+                    $stage = null;
+                    if ($session->isTournament()) {
+                        $stage = $this->getStageFromBlock($block['label']);
+                    }
+
+                    $game = Game::create([
+                        'session_id' => $session->id,
+                        'game_number' => $gameNumber,
+                        'stage' => $stage,
+                        'status' => 'pending',
+                        'team1_player1_id' => $team1Player1->id,
+                        'team1_player2_id' => $team1Player2->id,
+                        'team2_player1_id' => $team2Player1->id,
+                        'team2_player2_id' => $team2Player2->id,
+                    ]);
+
+                    $games->push($game);
+                    $gameNumber++;
+                }
+            }
+        }
+
+        $this->assignCourtsToGames($session, $games);
+        return $games;
+    }
+
+    private function isPlayoffBlock(string $label): bool
+    {
+        $playoffKeywords = ['Final', 'Semifinals', 'Medals', 'Playoff Finals', 'Bronze', 'Qualifier'];
+        foreach ($playoffKeywords as $keyword) {
+            if (stripos($label, $keyword) !== false) {
+                return true;
             }
         }
         
-        // Para torneos, mantener lógica existente
-        if ($session->isTournament()) {
-            $blockStage = $this->getStageFromBlock($block['label']);
-            if ($blockStage !== 1) {
-                Log::info('Saltando stage posterior en generación inicial', [
-                    'label' => $block['label'],
-                    'stage' => $blockStage
-                ]);
-                continue;
-            }
-        }
-
-        foreach ($block['rounds'] as $round) {
-            foreach ($round['courts'] as $courtData) {
-                $teamA = $courtData['A'];
-                $teamB = $courtData['B'];
-
-                $team1Player1 = $this->getPlayerFromNotation($teamA[0], $players);
-                $team1Player2 = $this->getPlayerFromNotation($teamA[1], $players);
-                $team2Player1 = $this->getPlayerFromNotation($teamB[0], $players);
-                $team2Player2 = $this->getPlayerFromNotation($teamB[1], $players);
-
-                if (!$team1Player1 || !$team1Player2 || !$team2Player1 || !$team2Player2) {
-                    continue;
-                }
-
-                $stage = null;
-                if ($session->isTournament()) {
-                    $stage = $this->getStageFromBlock($block['label']);
-                }
-
-                $game = Game::create([
-                    'session_id' => $session->id,
-                    'game_number' => $gameNumber,
-                    'stage' => $stage,
-                    'status' => 'pending',
-                    'team1_player1_id' => $team1Player1->id,
-                    'team1_player2_id' => $team1Player2->id,
-                    'team2_player1_id' => $team2Player1->id,
-                    'team2_player2_id' => $team2Player2->id,
-                ]);
-
-                $games->push($game);
-                $gameNumber++;
-            }
-        }
+        return false;
     }
-
-    $this->assignCourtsToGames($session, $games);
-    return $games;
-}
-
-// ← AGREGAR ESTE MÉTODO
-private function isPlayoffBlock(string $label): bool
-{
-       $playoffKeywords = ['Final', 'Semifinals', 'Medals', 'Playoff Finals', 'Bronze', 'Qualifier'];
-    foreach ($playoffKeywords as $keyword) {
-        if (stripos($label, $keyword) !== false) {
-            return true;
-        }
-    }
-    
-    return false;
-}
 
     private function getPlayerFromNotation(string $notation, Collection $players): ?Player
     {
@@ -195,418 +188,655 @@ private function isPlayoffBlock(string $label): bool
         return null;
     }
 
-
     public function generateAllGames(Session $session): Collection
-{
-    return $this->generateInitialGames($session);
-}
-
-private function assignCourtsToGames(Session $session, Collection $games): void
-{
-    $courts = $session->courts()
-        ->where('status', 'available')  // ✅ ASEGURAR que sean available
-        ->get();
-    
-    Log::info('Assigning courts to games', [
-        'session_id' => $session->id,
-        'total_games' => $games->count(),
-        'available_courts' => $courts->count(),
-        'courts_data' => $courts->map(fn($c) => [
-            'id' => $c->id,
-            'name' => $c->court_name,
-            'status' => $c->status
-        ])->toArray()
-    ]);
-    
-    // ✅ SOLO asignar canchas a los primeros N juegos (donde N = número de canchas)
-    foreach ($games->take($courts->count()) as $index => $game) {
-        if (isset($courts[$index])) {
-            $game->court_id = $courts[$index]->id;
-            $game->save();
-            
-            Log::info('Court assigned to game', [
-                'game_id' => $game->id,
-                'game_number' => $game->game_number,
-                'court_id' => $courts[$index]->id,
-                'court_name' => $courts[$index]->court_name
-            ]);
-        }
+    {
+        return $this->generateInitialGames($session);
     }
-    
-    // ✅ Los juegos restantes quedan SIN cancha (en cola)
-    foreach ($games->skip($courts->count()) as $game) {
-        $game->court_id = null;
-        $game->save();
+
+    private function assignCourtsToGames(Session $session, Collection $games): void
+    {
+        $courts = $session->courts()
+            ->where('status', 'available')
+            ->get();
         
-        Log::debug('Game left in queue', [
-            'game_id' => $game->id,
-            'game_number' => $game->game_number
-        ]);
-    }
-    
-    Log::info('Court assignment completed', [
-        'games_with_court' => $games->take($courts->count())->count(),
-        'games_in_queue' => $games->skip($courts->count())->count()
-    ]);
-}
-
-
-public function generateStageGames(Session $session): Collection
-{
-    if (!$session->isTournament()) {
-        Log::warning('Attempted to generate stage games for non-tournament session', [
+        Log::info('Assigning courts to games', [
             'session_id' => $session->id,
-            'session_type' => $session->session_type
+            'total_games' => $games->count(),
+            'available_courts' => $courts->count(),
+            'courts_data' => $courts->map(fn($c) => [
+                'id' => $c->id,
+                'name' => $c->court_name,
+                'status' => $c->status
+            ])->toArray()
         ]);
-        return collect();
-    }
-
-    $template = $this->loadTemplate($session);
-    
-    if (!$template) {
-        Log::warning('No template found for generating next stage', [
-            'session_id' => $session->id,
-            'current_stage' => $session->current_stage
-        ]);
-        return collect();
-    }
-
-    // ✅ CORREGIDO: Para Stage 1, ordenar por ID (orden de creación)
-    // Para Stage 2+, ordenar por ranking
-    if ($session->current_stage === 1) {
-        $players = $session->players()->orderBy('id')->get();
-    } else {
-        $players = $session->players()->orderBy('current_rank')->get();
-    }
-    
-    $games = collect();
-    
-    // Obtener el último game_number y sumar 1
-    $lastGame = $session->games()->orderBy('game_number', 'desc')->first();
-    $gameNumber = $lastGame ? $lastGame->game_number + 1 : 1;
-
-    Log::info('Generating stage games', [
-        'session_id' => $session->id,
-        'stage' => $session->current_stage,
-        'starting_game_number' => $gameNumber,
-        'players_count' => $players->count(),
-        'ordering' => $session->current_stage === 1 ? 'by_id' : 'by_rank'
-    ]);
-
-
-    
-
-    foreach ($template['blocks'] as $block) {
-        $blockStage = $this->getStageFromBlock($block['label']);
         
-        // Solo generar juegos del stage actual
-        if ($blockStage !== $session->current_stage) {
-            continue;
-        }
-
-        Log::info('Processing block for stage', [
-            'block_label' => $block['label'],
-            'target_stage' => $session->current_stage,
-            'rounds_count' => count($block['rounds'])
-        ]);
-
-        foreach ($block['rounds'] as $roundIndex => $round) {
-            foreach ($round['courts'] as $courtIndex => $courtData) {
-                $teamA = $courtData['A'];
-                $teamB = $courtData['B'];
-
-                // Obtener jugadores usando notación avanzada
-                $team1Player1 = $this->getPlayerFromAdvancedNotation($teamA[0], $players, $session);
-                $team1Player2 = $this->getPlayerFromAdvancedNotation($teamA[1], $players, $session);
-                $team2Player1 = $this->getPlayerFromAdvancedNotation($teamB[0], $players, $session);
-                $team2Player2 = $this->getPlayerFromAdvancedNotation($teamB[1], $players, $session);
-
-                // Validar que todos los jugadores estén disponibles
-                if (!$team1Player1 || !$team1Player2 || !$team2Player1 || !$team2Player2) {
-                    Log::warning('Cannot generate game - missing players', [
-                        'notation' => [$teamA, $teamB],
-                        'session_id' => $session->id,
-                        'stage' => $session->current_stage,
-                        'round' => $roundIndex,
-                        'court' => $courtIndex
-                    ]);
-                    continue;
-                }
-
-                $game = Game::create([
-                    'session_id' => $session->id,
-                    'game_number' => $gameNumber,
-                    'stage' => $blockStage,
-                    'status' => 'pending',
-                    'team1_player1_id' => $team1Player1->id,
-                    'team1_player2_id' => $team1Player2->id,
-                    'team2_player1_id' => $team2Player1->id,
-                    'team2_player2_id' => $team2Player2->id,
-                ]);
-
-                $games->push($game);
-                $gameNumber++;
-
-                Log::debug('Game created for stage', [
+        // ✅ SOLO asignar canchas a los primeros N juegos (donde N = número de canchas)
+        foreach ($games->take($courts->count()) as $index => $game) {
+            if (isset($courts[$index])) {
+                $game->court_id = $courts[$index]->id;
+                $game->save();
+                
+                Log::info('Court assigned to game', [
+                    'game_id' => $game->id,
                     'game_number' => $game->game_number,
-                    'stage' => $blockStage,
-                    'team1' => [$team1Player1->display_name, $team1Player2->display_name],
-                    'team2' => [$team2Player1->display_name, $team2Player2->display_name]
+                    'court_id' => $courts[$index]->id,
+                    'court_name' => $courts[$index]->court_name
                 ]);
             }
         }
-    }
-
-    // Asignar canchas a los primeros juegos
-    $this->assignCourtsToGames($session, $games);
-
-    Log::info('Stage games generation completed', [
-        'session_id' => $session->id,
-        'stage' => $session->current_stage,
-        'games_created' => $games->count(),
-        'final_game_number' => $gameNumber - 1
-    ]);
-
-    return $games;
-}
-
-
- 
-
-
-/**
- * Obtener jugador desde notación avanzada (Winner/Loser/R1P#)
- */
-private function getPlayerFromAdvancedNotation(string $notation, Collection $players, Session $session): ?Player
-{
-    // Notación de ranking simple (P1, P2, P3...)
-    if (preg_match('/^P(\d+)$/', $notation, $matches)) {
-        $position = (int)$matches[1];
         
-        // ✅ CORREGIDO: Para Stage 1, usar orden de creación (id)
-        if ($session->current_stage === 1) {
-            // Ordenar por ID (orden de creación) y tomar la posición
-            $sortedPlayers = $players->sortBy('id')->values();
-            return $sortedPlayers->get($position - 1); // -1 porque P1 es índice 0
+        // ✅ Los juegos restantes quedan SIN cancha (en cola)
+        foreach ($games->skip($courts->count()) as $game) {
+            $game->court_id = null;
+            $game->save();
+            
+            Log::debug('Game left in queue', [
+                'game_id' => $game->id,
+                'game_number' => $game->game_number
+            ]);
         }
         
-        // ✅ Para Stage 2+, usar ranking actual
-        return $players->where('current_rank', $position)->first();
-    }
-
-    // Notación de stage anterior (S1P1, S2P3...)
-    if (preg_match('/^S(\d+)P(\d+)$/', $notation, $matches)) {
-        $stage = (int)$matches[1];
-        $rank = (int)$matches[2];
-        
-        // Obtener jugador con ese rank del stage anterior
-        return $players->where('current_rank', $rank)->first();
-    }
-
-    // Notación de winner/loser (Winner of G1, Loser of SF1...)
-    if (preg_match('/(Winner|Loser) of (G\d+|SF\d+)/', $notation, $matches)) {
-        $resultType = $matches[1]; // Winner o Loser
-        $gameRef = $matches[2]; // G1, SF1, etc.
-        
-        return $this->getPlayerFromGameResult($session, $gameRef, $resultType);
-    }
-
-    Log::warning('Unknown player notation', ['notation' => $notation]);
-    return null;
-}
-
-
-
-
-/**
- * Obtener jugador basado en ranking de stage anterior
- */
-private function getPlayerFromPreviousStageRank(Session $session, int $stage, int $rank): ?Player
-{
-    // Para Stage 2: usar rankings de Stage 1
-    // Para Stage 3: usar rankings de Stage 2
-    $previousStage = $stage - 1;
-    
-    // Los rankings se actualizan automáticamente después de cada stage
-    // así que podemos usar current_rank directamente
-    return $session->players()
-        ->where('current_rank', $rank)
-        ->first();
-}
-
-/**
- * Obtener jugador basado en resultado de juego específico
- */
-private function getPlayerFromGameResult(Session $session, string $gameRef, string $resultType): ?Player
-{
-    // Buscar el juego por referencia (G1, SF1, etc.)
-    $game = $this->findGameByReference($session, $gameRef);
-    
-    if (!$game || $game->status !== 'completed') {
-        Log::warning('Referenced game not found or not completed', [
-            'game_ref' => $gameRef,
-            'result_type' => $resultType
+        Log::info('Court assignment completed', [
+            'games_with_court' => $games->take($courts->count())->count(),
+            'games_in_queue' => $games->skip($courts->count())->count()
         ]);
+    }
+
+    public function generateStageGames(Session $session): Collection
+    {
+        if (!$session->isTournament()) {
+            Log::warning('Attempted to generate stage games for non-tournament session', [
+                'session_id' => $session->id,
+                'session_type' => $session->session_type
+            ]);
+            return collect();
+        }
+
+        $template = $this->loadTemplate($session);
+        
+        if (!$template) {
+            Log::warning('No template found for generating next stage', [
+                'session_id' => $session->id,
+                'current_stage' => $session->current_stage
+            ]);
+            return collect();
+        }
+
+        // ✅ CORREGIDO: Para Stage 1, ordenar por ID (orden de creación)
+        // Para Stage 2+, ordenar por ranking
+        if ($session->current_stage === 1) {
+            $players = $session->players()->orderBy('id')->get();
+        } else {
+            $players = $session->players()->orderBy('current_rank')->get();
+        }
+        
+        $games = collect();
+        
+        // Obtener el último game_number y sumar 1
+        $lastGame = $session->games()->orderBy('game_number', 'desc')->first();
+        $gameNumber = $lastGame ? $lastGame->game_number + 1 : 1;
+
+        Log::info('Generating stage games', [
+            'session_id' => $session->id,
+            'stage' => $session->current_stage,
+            'starting_game_number' => $gameNumber,
+            'players_count' => $players->count(),
+            'ordering' => $session->current_stage === 1 ? 'by_id' : 'by_rank'
+        ]);
+
+        foreach ($template['blocks'] as $block) {
+            $blockStage = $this->getStageFromBlock($block['label']);
+            
+            // Solo generar juegos del stage actual
+            if ($blockStage !== $session->current_stage) {
+                continue;
+            }
+
+            Log::info('Processing block for stage', [
+                'block_label' => $block['label'],
+                'target_stage' => $session->current_stage,
+                'rounds_count' => count($block['rounds'])
+            ]);
+
+            foreach ($block['rounds'] as $roundIndex => $round) {
+                foreach ($round['courts'] as $courtIndex => $courtData) {
+                    $teamA = $courtData['A'];
+                    $teamB = $courtData['B'];
+
+                    // Obtener jugadores usando notación avanzada
+                    $team1Player1 = $this->getPlayerFromAdvancedNotation($teamA[0], $players, $session);
+                    $team1Player2 = $this->getPlayerFromAdvancedNotation($teamA[1], $players, $session);
+                    $team2Player1 = $this->getPlayerFromAdvancedNotation($teamB[0], $players, $session);
+                    $team2Player2 = $this->getPlayerFromAdvancedNotation($teamB[1], $players, $session);
+
+                    // Validar que todos los jugadores estén disponibles
+                    if (!$team1Player1 || !$team1Player2 || !$team2Player1 || !$team2Player2) {
+                        Log::warning('Cannot generate game - missing players', [
+                            'notation' => [$teamA, $teamB],
+                            'session_id' => $session->id,
+                            'stage' => $session->current_stage,
+                            'round' => $roundIndex,
+                            'court' => $courtIndex
+                        ]);
+                        continue;
+                    }
+
+                    $game = Game::create([
+                        'session_id' => $session->id,
+                        'game_number' => $gameNumber,
+                        'stage' => $blockStage,
+                        'status' => 'pending',
+                        'team1_player1_id' => $team1Player1->id,
+                        'team1_player2_id' => $team1Player2->id,
+                        'team2_player1_id' => $team2Player1->id,
+                        'team2_player2_id' => $team2Player2->id,
+                    ]);
+
+                    $games->push($game);
+                    $gameNumber++;
+
+                    Log::debug('Game created for stage', [
+                        'game_number' => $game->game_number,
+                        'stage' => $blockStage,
+                        'team1' => [$team1Player1->display_name, $team1Player2->display_name],
+                        'team2' => [$team2Player1->display_name, $team2Player2->display_name]
+                    ]);
+                }
+            }
+        }
+
+        // Asignar canchas a los primeros juegos
+        $this->assignCourtsToGames($session, $games);
+
+        Log::info('Stage games generation completed', [
+            'session_id' => $session->id,
+            'stage' => $session->current_stage,
+            'games_created' => $games->count(),
+            'final_game_number' => $gameNumber - 1
+        ]);
+
+        return $games;
+    }
+
+    /**
+     * Obtener jugador desde notación avanzada (Winner/Loser/R1P#)
+     */
+    private function getPlayerFromAdvancedNotation(string $notation, Collection $players, Session $session): ?Player
+    {
+        // Notación de ranking simple (P1, P2, P3...)
+        if (preg_match('/^P(\d+)$/', $notation, $matches)) {
+            $position = (int)$matches[1];
+            
+            // ✅ CORREGIDO: Para Stage 1, usar orden de creación (id)
+            if ($session->current_stage === 1) {
+                // Ordenar por ID (orden de creación) y tomar la posición
+                $sortedPlayers = $players->sortBy('id')->values();
+                return $sortedPlayers->get($position - 1); // -1 porque P1 es índice 0
+            }
+            
+            // ✅ Para Stage 2+, usar ranking actual
+            return $players->where('current_rank', $position)->first();
+        }
+
+        // Notación de stage anterior (S1P1, S2P3...)
+        if (preg_match('/^S(\d+)P(\d+)$/', $notation, $matches)) {
+            $stage = (int)$matches[1];
+            $rank = (int)$matches[2];
+            
+            // Obtener jugador con ese rank del stage anterior
+            return $players->where('current_rank', $rank)->first();
+        }
+
+        // Notación de winner/loser (Winner of G1, Loser of SF1...)
+        if (preg_match('/(Winner|Loser) of (G\d+|SF\d+)/', $notation, $matches)) {
+            $resultType = $matches[1]; // Winner o Loser
+            $gameRef = $matches[2]; // G1, SF1, etc.
+            
+            return $this->getPlayerFromGameResult($session, $gameRef, $resultType);
+        }
+
+        Log::warning('Unknown player notation', ['notation' => $notation]);
         return null;
     }
 
-    $isWinner = $resultType === 'Winner';
-    
-    if ($isWinner) {
-        return $game->winner_team === 1 
-            ? $game->team1Player1 // O lógica más compleja para equipos
-            : $game->team2Player1;
-    } else {
-        return $game->winner_team === 1 
-            ? $game->team2Player1 
-            : $game->team1Player1;
-    }
-}
-
-
-private function getPlayerFromPreviousGame(int $gameNumber, string $resultType, Session $session): ?Player
-{
-    $previousGame = $session->games()
-        ->where('game_number', $gameNumber)
-        ->where('status', 'completed')
-        ->first();
-
-    if (!$previousGame) {
-        Log::warning('Referenced game not found or not completed', [
-            'game_number' => $gameNumber,
-            'result_type' => $resultType
-        ]);
-        return null;
+    /**
+     * Obtener jugador basado en ranking de stage anterior
+     */
+    private function getPlayerFromPreviousStageRank(Session $session, int $stage, int $rank): ?Player
+    {
+        // Para Stage 2: usar rankings de Stage 1
+        // Para Stage 3: usar rankings de Stage 2
+        $previousStage = $stage - 1;
+        
+        // Los rankings se actualizan automáticamente después de cada stage
+        // así que podemos usar current_rank directamente
+        return $session->players()
+            ->where('current_rank', $rank)
+            ->first();
     }
 
-    $isWinner = $resultType === 'Winner';
-    
-    if ($isWinner) {
-        return $previousGame->winner_team === 1 
-            ? $previousGame->team1Player1 // Podría necesitar lógica más compleja aquí
-            : $previousGame->team2Player1;
-    } else {
-        return $previousGame->winner_team === 1 
-            ? $previousGame->team2Player1 
-            : $previousGame->team1Player1;
+    /**
+     * Obtener jugador basado en resultado de juego específico
+     */
+    private function getPlayerFromGameResult(Session $session, string $gameRef, string $resultType): ?Player
+    {
+        // Buscar el juego por referencia (G1, SF1, etc.)
+        $game = $this->findGameByReference($session, $gameRef);
+        
+        if (!$game || $game->status !== 'completed') {
+            Log::warning('Referenced game not found or not completed', [
+                'game_ref' => $gameRef,
+                'result_type' => $resultType
+            ]);
+            return null;
+        }
+
+        $isWinner = $resultType === 'Winner';
+        
+        if ($isWinner) {
+            return $game->winner_team === 1 
+                ? $game->team1Player1
+                : $game->team2Player1;
+        } else {
+            return $game->winner_team === 1 
+                ? $game->team2Player1 
+                : $game->team1Player1;
+        }
     }
-}
 
+    private function getPlayerFromPreviousGame(int $gameNumber, string $resultType, Session $session): ?Player
+    {
+        $previousGame = $session->games()
+            ->where('game_number', $gameNumber)
+            ->where('status', 'completed')
+            ->first();
 
-/**
- * Obtener jugadores ordenados por ranking
+        if (!$previousGame) {
+            Log::warning('Referenced game not found or not completed', [
+                'game_number' => $gameNumber,
+                'result_type' => $resultType
+            ]);
+            return null;
+        }
+
+        $isWinner = $resultType === 'Winner';
+        
+        if ($isWinner) {
+            return $previousGame->winner_team === 1 
+                ? $previousGame->team1Player1
+                : $previousGame->team2Player1;
+        } else {
+            return $previousGame->winner_team === 1 
+                ? $previousGame->team2Player1 
+                : $previousGame->team1Player1;
+        }
+    }
+
+    /**
+     * Obtener jugadores ordenados por ranking
+     */
+    private function getRankedPlayers(Session $session): Collection
+    {
+        return $session->players()
+            ->orderBy('current_rank')
+            ->get();
+    }
+
+    public function generatePlayoffBracket(Session $session): Collection
+    {
+        $games = collect();
+        $gameNumber = Game::where('session_id', $session->id)->max('game_number') + 1;
+
+        // ✅ CASO ESPECIAL: 1C2H6P-P8 (y futuro 1C2H7P-P8)
+        if ($this->isSpecialP8Template($session)) {
+            return $this->generateSpecialP8Bracket($session, $gameNumber);
+        }
+
+        // ✅ LÓGICA NORMAL PARA P4 Y P8 REGULARES
+        if ($session->isPlayoff4()) {
+            $topPlayers = $session->players()
+                ->orderBy('current_rank', 'asc')
+                ->limit(4)
+                ->get();
+
+            $team1 = collect([$topPlayers[0], $topPlayers[3]]);
+            $team2 = collect([$topPlayers[1], $topPlayers[2]]);
+
+            $game = $this->createGame($session, $gameNumber, null, $team1, $team2);
+            $game->is_playoff_game = true;
+            $game->playoff_round = 'final';
+            $game->save();
+
+            $games->push($game);
+            
+            Log::info('Playoff bracket P4 generado', [
+                'final_game' => $gameNumber,
+                'top_4' => $topPlayers->pluck('display_name')
+            ]);
+        } 
+        elseif ($session->isPlayoff8()) {
+            $topPlayers = $session->players()
+                ->orderBy('current_rank', 'asc')
+                ->limit(8)
+                ->get();
+
+            // Semifinal 1: P1+P8 vs P4+P5
+            $sf1Team1 = collect([$topPlayers[0], $topPlayers[7]]);
+            $sf1Team2 = collect([$topPlayers[3], $topPlayers[4]]);
+
+            $sf1 = $this->createGame($session, $gameNumber, null, $sf1Team1, $sf1Team2);
+            $sf1->is_playoff_game = true;
+            $sf1->playoff_round = 'semifinal';
+            $sf1->save();
+            $games->push($sf1);
+            $gameNumber++;
+
+            // Semifinal 2: P2+P7 vs P3+P6
+            $sf2Team1 = collect([$topPlayers[1], $topPlayers[6]]);
+            $sf2Team2 = collect([$topPlayers[2], $topPlayers[5]]);
+
+            $sf2 = $this->createGame($session, $gameNumber, null, $sf2Team1, $sf2Team2);
+            $sf2->is_playoff_game = true;
+            $sf2->playoff_round = 'semifinal';
+            $sf2->save();
+            $games->push($sf2);
+
+            Log::info('Playoff bracket P8 generado (semifinals)', [
+                'semifinals' => [$gameNumber - 1, $gameNumber],
+                'top_8' => $topPlayers->pluck('display_name')
+            ]);
+        }
+
+    //    $this->assignCourtsToGames($session, $games);
+        return $games;
+    }
+
+    /**
+     * ✅ NUEVO: Detectar templates especiales de P8 con menos de 8 jugadores
+     */
+    private function isSpecialP8Template(Session $session): bool
+    {
+        $specialTemplates = [
+            '1C2H6P-P8',
+            '1C2H7P-P8', // Para el futuro
+        ];
+        
+        $filename = $this->getTemplateFilename($session);
+        
+        return in_array(str_replace('.json', '', $filename), $specialTemplates);
+    }
+
+    /**
+     * ✅ NUEVO: Generar bracket especial para 1C2H6P-P8
+     * Genera solo el "Qualifier/Bronze" (G8)
+     * La final (G9) se genera después con generateSpecialP8Final()
+     */
+    /**
+ * ✅ CORREGIDO: Generar bracket especial P8 (SOLO Qualifier/Bronze)
+ * Guarda S1P1 y S1P4 en metadata para usarlos después en la Final
  */
-private function getRankedPlayers(Session $session): Collection
-{
-    return $session->players()
-        ->orderBy('current_rank')
-        ->get();
-}
 
-public function generatePlayoffBracket(Session $session): Collection
+private function generateSpecialP8Bracket(Session $session, int $gameNumber): Collection
 {
     $games = collect();
-    $gameNumber = Game::where('session_id', $session->id)->max('game_number') + 1;
+    
+    // Obtener top 6 jugadores ranqueados
+    $topPlayers = $session->players()
+        ->orderBy('current_rank', 'asc')
+        ->limit(6)
+        ->get();
 
-    if ($session->isPlayoff4()) {
-        // ✅ ORDENAR POR RANK
-        $topPlayers = $session->players()
-            ->orderBy('current_rank', 'asc')
-            ->limit(4)
-            ->get();
-
-        $team1 = collect([$topPlayers[0], $topPlayers[3]]);
-        $team2 = collect([$topPlayers[1], $topPlayers[2]]);
-
-        $game = $this->createGame($session, $gameNumber, null, $team1, $team2);
-        $game->is_playoff_game = true;
-        $game->playoff_round = 'final';
-        $game->save();
-
-        $games->push($game);
-        
-        Log::info('Playoff bracket P4 generado', [
-            'final_game' => $gameNumber,
-            'top_4' => $topPlayers->pluck('display_name')
+    if ($topPlayers->count() < 6) {
+        Log::error('Not enough players for special P8 bracket', [
+            'session_id' => $session->id,
+            'players_count' => $topPlayers->count()
         ]);
-    } 
-    elseif ($session->isPlayoff8()) {
-        // ✅ ORDENAR POR RANK
-        $topPlayers = $session->players()
-            ->orderBy('current_rank', 'asc')
-            ->limit(8)
-            ->get();
-
-        $sf1Team1 = collect([$topPlayers[0], $topPlayers[7]]);
-        $sf1Team2 = collect([$topPlayers[3], $topPlayers[4]]);
-
-        $sf1 = $this->createGame($session, $gameNumber, null, $sf1Team1, $sf1Team2);
-        $sf1->is_playoff_game = true;
-        $sf1->playoff_round = 'semifinal';
-        $sf1->save();
-        $games->push($sf1);
-        $gameNumber++;
-
-        $sf2Team1 = collect([$topPlayers[1], $topPlayers[6]]);
-        $sf2Team2 = collect([$topPlayers[2], $topPlayers[5]]);
-
-        $sf2 = $this->createGame($session, $gameNumber, null, $sf2Team1, $sf2Team2);
-        $sf2->is_playoff_game = true;
-        $sf2->playoff_round = 'semifinal';
-        $sf2->save();
-        $games->push($sf2);
-
-        Log::info('Playoff bracket P8 generado (semifinals)', [
-            'semifinals' => [$gameNumber - 1, $gameNumber],
-            'top_8' => $topPlayers->pluck('display_name')
-        ]);
+        return $games;
     }
 
-    // ❌ NO ASIGNAR CANCHAS AQUÍ
-    // $this->assignCourtsToGames($session, $games);
+    // ✅ GUARDAR S1P1 y S1P4 ANTES de cualquier cambio de ranking
+    $topSeedPlayer1Id = $topPlayers[0]->id; // S1P1
+    $topSeedPlayer2Id = $topPlayers[3]->id; // S1P4
 
+    // ✅ SOLO GENERAR EL QUALIFIER/BRONZE (G8)
+    // Pareja 2: S1P2 + S1P5
+    // Pareja 3: S1P3 + S1P6
+    $team1 = collect([$topPlayers[1], $topPlayers[4]]); // S1P2 + S1P5
+    $team2 = collect([$topPlayers[2], $topPlayers[5]]); // S1P3 + S1P6
+
+    $qualifierGame = $this->createGame($session, $gameNumber, null, $team1, $team2);
+    $qualifierGame->is_playoff_game = true;
+    $qualifierGame->playoff_round = 'qualifier';
+    
+    // ✅ GUARDAR IDs de S1P1 y S1P4 en metadata del juego
+    $qualifierGame->metadata = json_encode([
+        'top_seed_player1_id' => $topSeedPlayer1Id,
+        'top_seed_player2_id' => $topSeedPlayer2Id,
+        'top_seed_player1_name' => $topPlayers[0]->display_name,
+        'top_seed_player2_name' => $topPlayers[3]->display_name,
+    ]);
+    
+    $qualifierGame->save();
+    
+    $games->push($qualifierGame);
+
+    Log::info('Special P8 bracket generated (qualifier only)', [
+        'template' => $this->getTemplateFilename($session),
+        'qualifier_game' => $gameNumber,
+        'team1' => $team1->pluck('display_name'),
+        'team2' => $team2->pluck('display_name'),
+        'top_seeds_saved' => [
+            'S1P1_id' => $topSeedPlayer1Id,
+            'S1P1_name' => $topPlayers[0]->display_name,
+            'S1P4_id' => $topSeedPlayer2Id,
+            'S1P4_name' => $topPlayers[3]->display_name,
+        ],
+        'waiting_for_final' => 'S1P1 + S1P4 will face winner'
+    ]);
+
+    $this->assignCourtsToGames($session, $games);
     return $games;
 }
 
-public function generateP8Finals(Session $session, Collection $semifinals): Collection
+
+/**
+ * ✅ CORREGIDO: Generar Final del P8 especial usando S1P1+S1P4 guardados en metadata
+ */
+public function generateSpecialP8Final(Session $session): Collection
 {
     $games = collect();
     $gameNumber = Game::where('session_id', $session->id)->max('game_number') + 1;
 
-    $sf1 = $semifinals->first();
-    $sf2 = $semifinals->last();
+    // Obtener el juego "qualifier" completado
+    $qualifierGame = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'qualifier')
+        ->where('status', 'completed')
+        ->orderBy('game_number', 'desc') // ← Tomar el más reciente
+        ->first();
 
-    $sf1Winner = $this->getWinningPlayers($sf1);
-    $sf1Loser = $this->getLosingPlayers($sf1);
+    if (!$qualifierGame) {
+        Log::error('Cannot generate special P8 final: qualifier game not found or not completed', [
+            'session_id' => $session->id
+        ]);
+        return $games;
+    }
 
-    $sf2Winner = $this->getWinningPlayers($sf2);
-    $sf2Loser = $this->getLosingPlayers($sf2);
+    // ✅ LEER IDs de S1P1 y S1P4 desde metadata del qualifier
+    $metadata = json_decode($qualifierGame->metadata, true);
+    
+    if (!$metadata || !isset($metadata['top_seed_player1_id']) || !isset($metadata['top_seed_player2_id'])) {
+        Log::error('Cannot generate special P8 final: top seeds not found in metadata', [
+            'session_id' => $session->id,
+            'qualifier_game_id' => $qualifierGame->id,
+            'metadata' => $qualifierGame->metadata
+        ]);
+        return $games;
+    }
 
-    $goldGame = $this->createGame($session, $gameNumber, null, $sf1Winner, $sf2Winner);
-    $goldGame->is_playoff_game = true;
-    $goldGame->playoff_round = 'gold';
-    $goldGame->save();
-    $games->push($goldGame);
-    $gameNumber++;
+    // ✅ OBTENER S1P1 y S1P4 por ID (NO por ranking actual)
+    $topSeedPlayer1 = Player::find($metadata['top_seed_player1_id']);
+    $topSeedPlayer2 = Player::find($metadata['top_seed_player2_id']);
+    
+    if (!$topSeedPlayer1 || !$topSeedPlayer2) {
+        Log::error('Cannot find top seed players', [
+            'session_id' => $session->id,
+            'player1_id' => $metadata['top_seed_player1_id'],
+            'player2_id' => $metadata['top_seed_player2_id']
+        ]);
+        return $games;
+    }
+    
+    $topTeam = collect([$topSeedPlayer1, $topSeedPlayer2]);
+    
+    // Ganadores del qualifier
+    $qualifierWinners = $this->getWinningPlayers($qualifierGame);
 
-    $bronzeGame = $this->createGame($session, $gameNumber, null, $sf1Loser, $sf2Loser);
-    $bronzeGame->is_playoff_game = true;
-    $bronzeGame->playoff_round = 'bronze';
-    $bronzeGame->save();
-    $games->push($bronzeGame);
+    if ($qualifierWinners->count() !== 2) {
+        Log::error('Cannot determine qualifier winners', [
+            'session_id' => $session->id,
+            'qualifier_game_id' => $qualifierGame->id
+        ]);
+        return $games;
+    }
 
-    Log::info('P8 finals generated', [
-        'gold_game' => $goldGame->game_number,
-        'bronze_game' => $bronzeGame->game_number
+    // ✅ GENERAR LA FINAL
+    $finalGame = $this->createGame($session, $gameNumber, null, $topTeam, $qualifierWinners);
+    $finalGame->is_playoff_game = true;
+    $finalGame->playoff_round = 'final';
+    $finalGame->save();
+    
+    $games->push($finalGame);
+
+    Log::info('Special P8 final generated', [
+        'final_game' => $gameNumber,
+        'top_team' => $topTeam->pluck('display_name'),
+        'top_team_ids' => $topTeam->pluck('id'),
+        'top_team_from_metadata' => [
+            'S1P1' => $metadata['top_seed_player1_name'] ?? 'N/A',
+            'S1P4' => $metadata['top_seed_player2_name'] ?? 'N/A',
+        ],
+        'qualifier_winners' => $qualifierWinners->pluck('display_name')
     ]);
 
-    // ❌ NO ASIGNAR CANCHAS AQUÍ
     $this->assignCourtsToGames($session, $games);
-
     $session->updateProgress();
 
     return $games;
 }
+
+
+    /**
+     * ✅ MODIFICADO: P8 Finals ahora verifica si es template especial
+     */
+    public function generateP8Finals(Session $session, Collection $semifinals): Collection
+    {
+        // ✅ Si es template especial, usar método especial
+        if ($this->isSpecialP8Template($session)) {
+            return $this->generateSpecialP8Final($session);
+        }
+
+        // ✅ LÓGICA NORMAL PARA P8 REGULARES
+        $games = collect();
+        $gameNumber = Game::where('session_id', $session->id)->max('game_number') + 1;
+
+        $sf1 = $semifinals->first();
+        $sf2 = $semifinals->last();
+
+        $sf1Winner = $this->getWinningPlayers($sf1);
+        $sf1Loser = $this->getLosingPlayers($sf1);
+
+        $sf2Winner = $this->getWinningPlayers($sf2);
+        $sf2Loser = $this->getLosingPlayers($sf2);
+
+        $goldGame = $this->createGame($session, $gameNumber, null, $sf1Winner, $sf2Winner);
+        $goldGame->is_playoff_game = true;
+        $goldGame->playoff_round = 'gold';
+        $goldGame->save();
+        $games->push($goldGame);
+        $gameNumber++;
+
+        $bronzeGame = $this->createGame($session, $gameNumber, null, $sf1Loser, $sf2Loser);
+        $bronzeGame->is_playoff_game = true;
+        $bronzeGame->playoff_round = 'bronze';
+        $bronzeGame->save();
+        $games->push($bronzeGame);
+
+        Log::info('P8 finals generated', [
+            'gold_game' => $goldGame->game_number,
+            'bronze_game' => $bronzeGame->game_number
+        ]);
+
+        $this->assignCourtsToGames($session, $games);
+        $session->updateProgress();
+
+        return $games;
+    }
+
+
+    /**
+ * ✅ NUEVO: Generar Final para P4 basándose en resultados de semifinals
+ */
+public function generateP4Final(Session $session, Collection $semifinals): Collection
+{
+    $games = collect();
+    $gameNumber = Game::where('session_id', $session->id)->max('game_number') + 1;
+
+    if ($semifinals->count() !== 2) {
+        Log::error('Cannot generate P4 final: need exactly 2 semifinals', [
+            'session_id' => $session->id,
+            'semifinals_count' => $semifinals->count()
+        ]);
+        return $games;
+    }
+
+    // ✅ CRÍTICO: Usar RESULTADOS de las semifinals, NO ranking
+    $sf1 = $semifinals->first();
+    $sf2 = $semifinals->last();
+
+    // ✅ Obtener ganadores de cada semifinal
+    $sf1Winners = $this->getWinningPlayers($sf1);
+    $sf2Winners = $this->getWinningPlayers($sf2);
+
+    if ($sf1Winners->count() !== 2 || $sf2Winners->count() !== 2) {
+        Log::error('Cannot determine semifinal winners', [
+            'session_id' => $session->id,
+            'sf1_id' => $sf1->id,
+            'sf2_id' => $sf2->id
+        ]);
+        return $games;
+    }
+
+    // ✅ GENERAR LA FINAL con los ganadores de las semifinals
+    $finalGame = $this->createGame($session, $gameNumber, null, $sf1Winners, $sf2Winners);
+    $finalGame->is_playoff_game = true;
+    $finalGame->playoff_round = 'final';
+    $finalGame->save();
+
+    $games->push($finalGame);
+
+    Log::info('P4 final generated', [
+        'session_id' => $session->id,
+        'final_game' => $gameNumber,
+        'sf1_winners' => $sf1Winners->pluck('display_name'),
+        'sf2_winners' => $sf2Winners->pluck('display_name'),
+        'team1' => [
+            'player1' => $sf1Winners[0]->display_name,
+            'player2' => $sf1Winners[1]->display_name,
+        ],
+        'team2' => [
+            'player1' => $sf2Winners[0]->display_name,
+            'player2' => $sf2Winners[1]->display_name,
+        ]
+    ]);
+
+    $this->assignCourtsToGames($session, $games);
+    $session->updateProgress();
+
+    return $games;
+}
+
+
     private function getWinningPlayers(Game $game): Collection
     {
         if ($game->winner_team === 1) {
@@ -667,7 +897,7 @@ public function generateP8Finals(Session $session, Collection $semifinals): Coll
             'stage' => $stage,
             'status' => 'pending',
             'team1_player1_id' => $team1[0]->id,
-            'team1_player2_id' => $team1[1]->id,
+            'team1_player2_id' => $team1[1]-> id,
             'team2_player1_id' => $team2[0]->id,
             'team2_player2_id' => $team2[1]->id,
         ]);
@@ -676,5 +906,37 @@ public function generateP8Finals(Session $session, Collection $semifinals): Coll
     private function canGenerateMoreGames(array $playerGameCount, int $minGamesPerPlayer): bool
     {
         return count(array_filter($playerGameCount, fn($count) => $count < $minGamesPerPlayer)) >= 4;
+    }
+
+    /**
+     * Buscar un juego por referencia (G1, SF1, etc.)
+     */
+    private function findGameByReference(Session $session, string $gameRef): ?Game
+    {
+        // Para referencias simples como "G8"
+        if (preg_match('/^G(\d+)$/', $gameRef, $matches)) {
+            $gameNumber = (int)$matches[1];
+            return $session->games()
+                ->where('game_number', $gameNumber)
+                ->first();
+        }
+
+        // Para referencias de semifinales como "SF1", "SF2"
+        if (preg_match('/^SF(\d+)$/', $gameRef, $matches)) {
+            $semifinalNumber = (int)$matches[1];
+            
+            // Las semifinales son los juegos con playoff_round = 'semifinal'
+            // SF1 es la primera semifinal, SF2 es la segunda
+            $semifinals = $session->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'semifinal')
+                ->orderBy('game_number')
+                ->get();
+
+            return $semifinals->get($semifinalNumber - 1); // -1 porque SF1 es índice 0
+        }
+
+        Log::warning('Unknown game reference format', ['game_ref' => $gameRef]);
+        return null;
     }
 }

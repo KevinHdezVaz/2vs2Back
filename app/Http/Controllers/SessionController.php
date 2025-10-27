@@ -30,23 +30,24 @@ public function store(Request $request): JsonResponse
     \Log::info('Request data received:', $request->all());
     
     try {
-        $validated = $request->validate([
-            'session_name' => 'required|string|max:255',
-            'number_of_courts' => 'required|integer|min:1|max:4',
-            'duration_hours' => 'required|integer|min:1|max:3',
-            'number_of_players' => 'required|integer',
-            'points_per_game' => 'required|integer|in:7,11,15,21',
-            'win_by' => 'required|integer|in:1,2',
-            'number_of_sets' => 'required|string',
-            'session_type' => 'required|string|in:T,P4,P8,O',
-            'courts' => 'required|array',
-            'courts.*.court_name' => 'required|string',
-            'players' => 'required|array',
-            'players.*.first_name' => 'required|string',
-            'players.*.last_initial' => 'required|string|max:50',
-            'players.*.level' => 'nullable|string',
-            'players.*.dominant_hand' => 'nullable|string',
-        ]);
+      
+$validated = $request->validate([
+    'session_name' => 'required|string|max:255',
+    'number_of_courts' => 'required|integer|min:1|max:4',
+    'duration_hours' => 'required|integer|min:1|max:3',
+    'number_of_players' => 'required|integer',
+    'points_per_game' => 'required|integer|in:7,11,15,21',
+    'win_by' => 'required|integer|in:1,2',
+    'number_of_sets' => 'required|string|in:1,3', // ✅ CAMBIO: Solo permitir 1 o 3
+    'session_type' => 'required|string|in:T,P4,P8,O',
+    'courts' => 'required|array',
+    'courts.*.court_name' => 'required|string',
+    'players' => 'required|array',
+    'players.*.first_name' => 'required|string',
+    'players.*.last_initial' => 'required|string|max:50',
+    'players.*.level' => 'nullable|string',
+    'players.*.dominant_hand' => 'nullable|string',
+]);
     } catch (\Illuminate\Validation\ValidationException $e) {
         \Log::error('Validation error:', [
             'errors' => $e->errors(),
@@ -892,9 +893,7 @@ private function getOptimizedPodiumData(Session $session): array
     ];
 }
 
- 
-
-public function advanceToNextStage(Request $request, Session $session): JsonResponse
+  public function advanceToNextStage(Request $request, Session $session): JsonResponse
 {
     try {
         // ✅ VALIDAR: P4/P8 O Tournament
@@ -905,8 +904,115 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
             ], 400);
         }
 
+        // ✅ NUEVO: Detectar P8 NORMAL que necesita generar Gold/Bronze
+        if ($this->isNormalP8NeedingFinals($session)) {
+            Log::info('🆕 Detectado P8 normal - generando GOLD/BRONZE desde semifinals');
+            
+            $semifinals = $session->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'semifinal')
+                ->where('status', 'completed')
+                ->get();
+            
+            $newGames = $this->gameGenerator->generateP8Finals($session, $semifinals);
+            
+            if ($newGames->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No se pudo generar Gold/Bronze'
+                ], 400);
+            }
+
+            Log::info('✅ Gold/Bronze del P8 normal generados', [
+                'session_id' => $session->id,
+                'new_games_count' => $newGames->count()
+            ]);
+
+            $session->updateProgress();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Finals generated successfully!',
+                'new_games_count' => $newGames->count(),
+                'total_games' => $session->games()->count()
+            ]);
+        }
+
+        // ✅ NUEVO: Detectar P4 que necesita generar Final
+        if ($this->isP4NeedingFinal($session)) {
+            Log::info('🆕 Detectado P4 - generando FINAL desde semifinals');
+            
+            $semifinals = $session->games()
+                ->where('is_playoff_game', true)
+                ->where('playoff_round', 'semifinal')
+                ->where('status', 'completed')
+                ->get();
+            
+            $newGames = $this->gameGenerator->generateP4Final($session, $semifinals);
+            
+            if ($newGames->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No se pudo generar la Final'
+                ], 400);
+            }
+
+            Log::info('✅ Final del P4 generada', [
+                'session_id' => $session->id,
+                'new_games_count' => $newGames->count()
+            ]);
+
+            $session->updateProgress();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Final generated successfully!',
+                'new_games_count' => $newGames->count(),
+                'total_games' => $session->games()->count()
+            ]);
+        }
+
+        // P8 ESPECIAL - Lógica existente
+        if ($this->isSpecialP8NeedingFinal($session)) {
+            Log::info('🆕 Detectado P8 especial - generando FINAL');
+            $newGames = $this->gameGenerator->generateSpecialP8Final($session);
+            
+            if ($newGames->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No se pudo generar la final del P8 especial'
+                ], 400);
+            }
+
+            Log::info('✅ Final del P8 especial generada', [
+                'session_id' => $session->id,
+                'new_games_count' => $newGames->count()
+            ]);
+
+            $session->updateProgress();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Final generated successfully!',
+                'new_games_count' => $newGames->count(),
+                'total_games' => $session->games()->count()
+            ]);
+        }
+
+        // ✅ NUEVO: Detectar P8 especial YA COMPLETO
+        if ($this->isSpecialP8Complete($session)) {
+            Log::info('⛔ P8 especial ya completo - no se puede avanzar más', [
+                'session_id' => $session->id
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'error' => 'All playoff games have already been generated. Session is complete!'
+            ], 400);
+        }
+
         $sessionType = $session->session_type;
-        
+
         // ========================================
         // LÓGICA PARA TOURNAMENT (T)
         // ========================================
@@ -916,12 +1022,11 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
                 'current_stage' => $session->current_stage,
             ]);
 
-            // ✅ Verificar que no haya juegos activos del stage actual
             $activeGamesInCurrentStage = $session->games()
                 ->where('stage', $session->current_stage)
                 ->where('status', 'active')
                 ->count();
-                
+
             if ($activeGamesInCurrentStage > 0) {
                 return response()->json([
                     'success' => false,
@@ -929,7 +1034,6 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
                 ], 400);
             }
 
-            // ✅ PASO 1: Estado ANTES
             $beforeState = [
                 'total_games' => $session->games()->count(),
                 'current_stage' => $session->current_stage,
@@ -941,25 +1045,23 @@ public function advanceToNextStage(Request $request, Session $session): JsonResp
 
             Log::info('📊 Estado ANTES de avanzar stage', $beforeState);
 
-            // ✅ PASO 2: CANCELAR juegos pendientes del stage actual
             $cancelledGames = $session->games()
                 ->where('stage', $session->current_stage)
                 ->where('status', 'pending')
                 ->get();
-            
+
             foreach ($cancelledGames as $game) {
                 $game->status = 'cancelled';
                 $game->court_id = null;
                 $game->save();
             }
-            
+
             Log::info('🗑️ Juegos pendientes cancelados', [
                 'cancelled_count' => $cancelledGames->count()
             ]);
 
-            // ✅ PASO 3: Actualizar rankings ANTES de avanzar
-$session->updateRankings(); // ← CORREGIDO
-            
+            $session->updateRankings();
+
             Log::info('📈 Rankings actualizados después de Stage ' . $session->current_stage, [
                 'top_8_players' => $session->players()
                     ->orderBy('current_rank')
@@ -969,20 +1071,17 @@ $session->updateRankings(); // ← CORREGIDO
                     ->toArray()
             ]);
 
-            // ✅ PASO 4: Avanzar al siguiente stage
             $session->current_stage++;
             $session->save();
-            
+
             Log::info('⬆️ Stage avanzado', [
                 'new_stage' => $session->current_stage
             ]);
 
-            // ✅ PASO 5: Generar juegos del nuevo stage
             $newGames = $this->gameGenerator->generateStageGames($session);
-            
+
             if ($newGames->isEmpty()) {
                 Log::warning('❌ No se generaron juegos para Stage ' . $session->current_stage);
-                
                 return response()->json([
                     'success' => false,
                     'error' => 'No se pudieron generar juegos para el siguiente stage'
@@ -994,10 +1093,8 @@ $session->updateRankings(); // ← CORREGIDO
                 'new_games_count' => $newGames->count()
             ]);
 
-            // ✅ PASO 6: Actualizar progreso
             $session->updateProgress();
 
-            // ✅ PASO 7: Estado DESPUÉS
             $afterState = [
                 'total_games' => $session->games()->count(),
                 'current_stage' => $session->current_stage,
@@ -1024,14 +1121,13 @@ $session->updateRankings(); // ← CORREGIDO
         }
 
         // ========================================
-        // LÓGICA PARA PLAYOFFS (P4/P8)
+        // LÓGICA PARA PLAYOFFS INICIALES (P4/P8)
         // ========================================
         Log::info('🎯 Iniciando avance a playoffs', [
             'session_id' => $session->id,
             'session_type' => $session->session_type,
         ]);
 
-        // ✅ PASO 1: Contar estado actual ANTES de modificar
         $beforeState = [
             'total_games' => $session->games()->count(),
             'pending_games' => $session->games()->where('status', 'pending')->count(),
@@ -1042,7 +1138,6 @@ $session->updateRankings(); // ← CORREGIDO
 
         Log::info('📊 Estado ANTES de eliminar', $beforeState);
 
-        // ✅ PASO 2: ELIMINAR TODOS los juegos que NO estén completed
         $deletedCount = $session->games()
             ->whereIn('status', ['pending', 'active'])
             ->delete();
@@ -1052,10 +1147,10 @@ $session->updateRankings(); // ← CORREGIDO
             'remaining_games' => $session->games()->count()
         ]);
 
-        // ✅ PASO 3: Actualizar rankings ANTES de generar bracket
+        // ✅ IMPORTANTE: Actualizar rankings UNA SOLA VEZ aquí
         $session->updateRankings();
 
-        Log::info('📈 Rankings actualizados', [
+        Log::info('📈 Rankings actualizados ANTES de generar bracket', [
             'top_8_players' => $session->players()
                 ->orderBy('current_rank')
                 ->limit(8)
@@ -1064,12 +1159,10 @@ $session->updateRankings(); // ← CORREGIDO
                 ->toArray()
         ]);
 
-        // ✅ PASO 4: Generar bracket de playoffs
         $newGames = $this->gameGenerator->generatePlayoffBracket($session);
 
         if ($newGames->isEmpty()) {
             Log::warning('❌ No se generaron juegos de playoff');
-            
             return response()->json([
                 'success' => false,
                 'error' => 'No se pudieron generar los juegos de playoff'
@@ -1081,10 +1174,9 @@ $session->updateRankings(); // ← CORREGIDO
             'playoff_rounds' => $newGames->pluck('playoff_round')->unique()->toArray()
         ]);
 
-        // ✅ PASO 5: ASIGNAR CANCHAS solo a los primeros N juegos
         $courts = $session->courts()->where('status', 'available')->get();
         $gamesWithCourts = 0;
-        
+
         foreach ($newGames->take($courts->count()) as $index => $game) {
             if (isset($courts[$index])) {
                 $game->court_id = $courts[$index]->id;
@@ -1092,8 +1184,7 @@ $session->updateRankings(); // ← CORREGIDO
                 $gamesWithCourts++;
             }
         }
-        
-        // Los juegos restantes quedan SIN cancha
+
         foreach ($newGames->skip($courts->count()) as $game) {
             $game->court_id = null;
             $game->save();
@@ -1104,10 +1195,8 @@ $session->updateRankings(); // ← CORREGIDO
             'games_in_queue' => $newGames->count() - $gamesWithCourts
         ]);
 
-        // ✅ PASO 6: Actualizar progreso
         $session->updateProgress();
 
-        // ✅ PASO 7: Estado DESPUÉS
         $afterState = [
             'total_games' => $session->games()->count(),
             'pending_games' => $session->games()->where('status', 'pending')->count(),
@@ -1134,16 +1223,188 @@ $session->updateRankings(); // ← CORREGIDO
     } catch (\Exception $e) {
         Log::error('❌ Error advancing stage', [
             'session_id' => $session->id,
-            'session_type' => $session->session_type,
+            'session_type' => $session->session_type ?? 'unknown',
             'error' => $e->getMessage(),
             'trace' => $e->getTraceAsString()
         ]);
-        
+
         return response()->json([
             'success' => false,
             'error' => 'Failed to advance: ' . $e->getMessage()
         ], 500);
     }
+}
+
+// ✅ NUEVOS MÉTODOS DE DETECCIÓN
+
+/**
+ * Detectar si es P8 NORMAL que necesita generar Gold/Bronze
+ */
+private function isNormalP8NeedingFinals(Session $session): bool
+{
+    if (!$session->isPlayoff8()) {
+        return false;
+    }
+
+    // NO es template especial
+    $specialTemplates = ['1C2H6P-P8', '1C2H7P-P8'];
+    $templateName = sprintf(
+        '%dC%dH%dP-%s',
+        $session->number_of_courts,
+        $session->duration_hours,
+        $session->number_of_players,
+        $session->session_type
+    );
+
+    if (in_array($templateName, $specialTemplates)) {
+        return false; // Es especial, no normal
+    }
+
+    // ✅ VERIFICAR: ¿Tiene 2 semifinals completadas?
+    $completedSemifinals = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'semifinal')
+        ->where('status', 'completed')
+        ->count();
+
+    // ✅ VERIFICAR: ¿Ya existen Gold/Bronze?
+    $hasFinals = $session->games()
+        ->where('is_playoff_game', true)
+        ->whereIn('playoff_round', ['gold', 'bronze'])
+        ->exists();
+
+    $shouldGenerate = ($completedSemifinals === 2) && !$hasFinals;
+
+    Log::info('🔍 Verificación P8 normal', [
+        'session_id' => $session->id,
+        'template' => $templateName,
+        'completed_semifinals' => $completedSemifinals,
+        'has_finals' => $hasFinals,
+        'should_generate' => $shouldGenerate
+    ]);
+
+    return $shouldGenerate;
+}
+
+/**
+ * Detectar si es P4 que necesita generar Final
+ */
+private function isP4NeedingFinal(Session $session): bool
+{
+    if (!$session->isPlayoff4()) {
+        return false;
+    }
+
+    // ✅ VERIFICAR: ¿Tiene 2 semifinals completadas?
+    $completedSemifinals = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'semifinal')
+        ->where('status', 'completed')
+        ->count();
+
+    // ✅ VERIFICAR: ¿Ya existe Final?
+    $hasFinal = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'final')
+        ->exists();
+
+    $shouldGenerate = ($completedSemifinals === 2) && !$hasFinal;
+
+    Log::info('🔍 Verificación P4', [
+        'session_id' => $session->id,
+        'completed_semifinals' => $completedSemifinals,
+        'has_final' => $hasFinal,
+        'should_generate' => $shouldGenerate
+    ]);
+
+    return $shouldGenerate;
+}
+
+ 
+/**
+ * ✅ NUEVO MÉTODO: Detectar si es P8 especial que necesita generar la Final
+ */
+private function isSpecialP8NeedingFinal(Session $session): bool
+{
+    // Solo aplica para P8
+    if (!$session->isPlayoff8()) {
+        return false;
+    }
+
+    // Verificar si es template especial (1C2H6P-P8 o 1C2H7P-P8)
+    $specialTemplates = ['1C2H6P-P8', '1C2H7P-P8'];
+    $templateName = sprintf(
+        '%dC%dH%dP-%s',
+        $session->number_of_courts,
+        $session->duration_hours,
+        $session->number_of_players,
+        $session->session_type
+    );
+
+    if (!in_array($templateName, $specialTemplates)) {
+        Log::debug('No es template especial', ['template' => $templateName]);
+        return false;
+    }
+
+    // ✅ VERIFICAR: ¿Ya existe un Qualifier completado?
+    $hasCompletedQualifier = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'qualifier')
+        ->where('status', 'completed')
+        ->exists();
+
+    // ✅ VERIFICAR: ¿Ya existe una Final generada?
+    $hasFinal = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'final')
+        ->exists();
+
+    // Debe tener Qualifier completado Y NO tener Final generada
+    $shouldGenerateFinal = $hasCompletedQualifier && !$hasFinal;
+
+    Log::info('🔍 Verificación P8 especial', [
+        'session_id' => $session->id,
+        'template' => $templateName,
+        'has_completed_qualifier' => $hasCompletedQualifier,
+        'has_final' => $hasFinal,
+        'should_generate_final' => $shouldGenerateFinal
+    ]);
+
+    return $shouldGenerateFinal;
+}
+
+/**
+ * ✅ NUEVO MÉTODO: Detectar si P8 especial ya está completo (Qualifier + Final)
+ */
+private function isSpecialP8Complete(Session $session): bool
+{
+    // Solo aplica para P8
+    if (!$session->isPlayoff8()) {
+        return false;
+    }
+
+    // Verificar si es template especial
+    $specialTemplates = ['1C2H6P-P8', '1C2H7P-P8'];
+    $templateName = sprintf(
+        '%dC%dH%dP-%s',
+        $session->number_of_courts,
+        $session->duration_hours,
+        $session->number_of_players,
+        $session->session_type
+    );
+
+    if (!in_array($templateName, $specialTemplates)) {
+        return false;
+    }
+
+    // ✅ VERIFICAR: ¿Ya existe Final?
+    $hasFinal = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'final')
+        ->exists();
+
+    // Si ya tiene Final, está completo
+    return $hasFinal;
 }
  
 /**
@@ -1152,81 +1413,80 @@ $session->updateRankings(); // ← CORREGIDO
 /**
  * Generar finals de P8 manualmente
  */
-public function generateP8Finals(Session $session): JsonResponse
-{
-    if ($session->user_id !== auth()->id()) {
-        return response()->json(['message' => 'No autorizado'], 403);
-    }
+  public function generateP8Finals(Session $session): JsonResponse
+    {
+        if ($session->user_id !== auth()->id()) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
 
-    if (!$session->isPlayoff8()) {
-        return response()->json([
-            'message' => 'Only P8 sessions can generate finals'
-        ], 422);
-    }
+        if (!$session->isPlayoff8()) {
+            return response()->json([
+                'message' => 'Only P8 sessions can generate finals'
+            ], 422);
+        }
 
-    // Verificar que las semifinals estén completadas
-    $semifinals = $session->games()
-        ->where('is_playoff_game', true)
-        ->where('playoff_round', 'semifinal')
-        ->get();
+        // Verificar que las semifinals estén completadas
+        $semifinals = $session->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'semifinal')
+            ->get();
 
-    if ($semifinals->count() !== 2) {
-        return response()->json([
-            'message' => 'Both semifinals must exist'
-        ], 422);
-    }
+        if ($semifinals->count() !== 2) {
+            return response()->json([
+                'message' => 'Both semifinals must exist'
+            ], 422);
+        }
 
-    if ($semifinals->where('status', 'completed')->count() !== 2) {
-        return response()->json([
-            'message' => 'Both semifinals must be completed'
-        ], 422);
-    }
+        if ($semifinals->where('status', 'completed')->count() !== 2) {
+            return response()->json([
+                'message' => 'Both semifinals must be completed'
+            ], 422);
+        }
 
-    // Verificar que no existan finals ya
-    $existingFinals = $session->games()
-        ->where('is_playoff_game', true)
-        ->whereIn('playoff_round', ['gold', 'bronze'])
-        ->exists();
+        // Verificar que no existan finals ya
+        $existingFinals = $session->games()
+            ->where('is_playoff_game', true)
+            ->whereIn('playoff_round', ['gold', 'bronze'])
+            ->exists();
 
-    if ($existingFinals) {
-        return response()->json([
-            'message' => 'Finals have already been generated'
-        ], 422);
-    }
+        if ($existingFinals) {
+            return response()->json([
+                'message' => 'Finals have already been generated'
+            ], 422);
+        }
 
-    // Limpiar juegos pending antes de generar finals
-    $pendingCount = $session->games()->where('status', 'pending')->count();
-    if ($pendingCount > 0) {
-        $deletedCount = $session->games()->where('status', 'pending')->delete();
-        
-        Log::info('Pending games deleted before generating P8 finals', [
+        // Limpiar juegos pending antes de generar finals
+        $pendingCount = $session->games()->where('status', 'pending')->count();
+        if ($pendingCount > 0) {
+            $deletedCount = $session->games()->where('status', 'pending')->delete();
+            
+            Log::info('Pending games deleted before generating P8 finals', [
+                'session_id' => $session->id,
+                'deleted_count' => $deletedCount
+            ]);
+        }
+
+        // Generar finals
+        $games = $this->gameGenerator->generateP8Finals($session, $semifinals);
+
+        Log::info('P8 finals generated successfully', [
             'session_id' => $session->id,
-            'deleted_count' => $deletedCount
+            'games_generated' => $games->count(),
+            'previous_pending_deleted' => $pendingCount
+        ]);
+
+        // ✅ CORREGIDO: Obtener juegos frescos con relaciones
+        $gameIds = $games->pluck('id');
+        $gamesWithRelations = Game::whereIn('id', $gameIds)
+            ->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
+            ->get();
+
+        return response()->json([
+            'message' => 'Finals generated successfully',
+            'games' => $gamesWithRelations,
+            'previous_pending_deleted' => $pendingCount
         ]);
     }
-
-    // Generar finals
-    $games = $this->gameGenerator->generateP8Finals($session, $semifinals);
-
-    Log::info('P8 finals generated successfully', [
-        'session_id' => $session->id,
-        'games_generated' => $games->count(),
-        'previous_pending_deleted' => $pendingCount
-    ]);
-
-    // ✅ CORREGIDO: Obtener juegos frescos con relaciones
-    $gameIds = $games->pluck('id');
-    $gamesWithRelations = Game::whereIn('id', $gameIds)
-        ->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
-        ->get();
-
-    return response()->json([
-        'message' => 'Finals generated successfully',
-        'games' => $gamesWithRelations,
-        'previous_pending_deleted' => $pendingCount
-    ]);
-}
-
 
 public function generateNextStageGames(Session $session): Collection
 {

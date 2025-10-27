@@ -1,7 +1,7 @@
 <?php
 
 namespace App\Http\Controllers;
-use App\Models\Affiliate; // <-- Añade esta línea al principio del archivo
+use App\Models\Affiliate;
 
 use Carbon\Carbon;
 use App\Models\User;
@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Validator;
 use Kreait\Firebase\Auth as FirebaseAuth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Http\JsonResponse;
 
 class AuthController extends Controller
 {
@@ -33,54 +34,49 @@ class AuthController extends Controller
             ->createAuth();
     }
 
-
     public function register(Request $request)
-{
-    // 1. Validar los datos
-    $validated = $request->validate([
-        'name' => 'required|string|max:255',
-        'email' => 'required|string|email|max:255|unique:users',
-        'phone' => 'nullable|string|max:20|unique:users',
-        'password' => 'required|string|min:6',
-        'affiliate_code' => 'nullable|string|exists:affiliates,referral_code',
-    ]);
+    {
+        // 1. Validar los datos
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'phone' => 'nullable|string|max:20|unique:users',
+            'password' => 'required|string|min:6',
+            'affiliate_code' => 'nullable|string|exists:affiliates,referral_code',
+        ]);
 
-    Log::info('Datos validados para registro:', $validated);
+        Log::info('Datos validados para registro:', $validated);
 
-    // 2. Hashear la contraseña
-    $validated['password'] = Hash::make($validated['password']);
-    Log::info('Contraseña hasheada.');
+        // 2. Hashear la contraseña
+        $validated['password'] = Hash::make($validated['password']);
+        Log::info('Contraseña hasheada.');
 
-    // 3. Añadir datos del período de prueba
-    $validated['trial_ends_at'] = Carbon::now()->addDays(5);
-    $validated['subscription_status'] = 'trial';
-    
-    // 4. Guardar el código de afiliado que se usó (si existe)
-    if ($request->has('affiliate_code')) {
-        $validated['applied_affiliate_code'] = $request->affiliate_code;
+        // 3. Añadir datos del período de prueba
+        $validated['trial_ends_at'] = Carbon::now()->addDays(5);
+        $validated['subscription_status'] = 'trial';
+        
+        // 4. Guardar el código de afiliado que se usó (si existe)
+        if ($request->has('affiliate_code')) {
+            $validated['applied_affiliate_code'] = $request->affiliate_code;
+        }
+
+        Log::info('Datos de prueba y afiliado añadidos.');
+
+        // 5. Crear el usuario en la base de datos
+        $user = User::create($validated);
+
+        Log::info('Usuario creado:', ['id' => $user->id, 'email' => $user->email]);
+
+        // 6. Crear un token
+        $token = $user->createToken('auth_token')->plainTextToken;
+        Log::info('Token generado para el usuario.');
+
+        // 7. Devolver la respuesta
+        return response()->json([
+            'user' => $user,
+            'token' => $token,
+        ], 201);
     }
-
-    Log::info('Datos de prueba y afiliado añadidos.');
-
-    // 5. Crear el usuario en la base de datos
-    $user = User::create($validated);
-    
-    // ❌ ELIMINA ESTA LÍNEA:
-    // $user->profile()->create();
-
-    Log::info('Usuario creado:', ['id' => $user->id, 'email' => $user->email]);
-
-    // 6. Crear un token
-    $token = $user->createToken('auth_token')->plainTextToken;
-    Log::info('Token generado para el usuario.');
-
-    // 7. Devolver la respuesta
-    return response()->json([
-        'user' => $user,
-        'token' => $token,
-    ], 201);
-}
-
 
     /**
      * Inicia sesión para un usuario existente.
@@ -96,7 +92,7 @@ class AuthController extends Controller
 
         // Verificar que el usuario exista y la contraseña sea correcta.
         if (!$user || !Hash::check($validated['password'], $user->password)) {
-            return response()->json(['message' => 'Credenciales inválidas'], 401); // 401: Unauthorized
+            return response()->json(['message' => 'Credenciales inválidas'], 401);
         }
     
         return response()->json([
@@ -105,7 +101,6 @@ class AuthController extends Controller
         ]);
     }
 
- 
     public function googleLogin(Request $request)
     {
         try {
@@ -132,30 +127,24 @@ class AuthController extends Controller
                 $email = $claims->get('email');
                 $name = $claims->get('name') ?? 'Usuario Google';
                 
-                // --- INICIA CAMBIO ---
-                // Busca un usuario por email. Si no existe, lo crea con los datos del segundo array.
-                // Aquí es donde añadimos la lógica de la prueba gratuita para los NUEVOS usuarios de Google.
                 $user = User::firstOrCreate(
-                    ['email' => $email], // Atributos para buscar al usuario
-                    [                   // Atributos para usar si el usuario se CREA
+                    ['email' => $email],
+                    [
                         'name' => $name,
-                        'password' => Hash::make(uniqid()), // Contraseña aleatoria ya que usan Google
+                        'password' => Hash::make(uniqid()),
                         'firebase_uid' => $firebaseUid,
                         'auth_provider' => 'google',
                         'trial_ends_at' => Carbon::now()->addDays(5),
                         'subscription_status' => 'trial',
-                        'phone' => null, // <-- Puedes establecerlo como null inicialmente
-
+                        'phone' => null,
                     ]
                 );
-                // --- TERMINA CAMBIO ---
     
-                
                 $token = $user->createToken('auth_token')->plainTextToken;
     
                 return response()->json([
                     'success' => true,
-                    'user' => $user, // Devolvemos el objeto de usuario completo
+                    'user' => $user,
                     'token' => $token,
                 ]);
     
@@ -182,8 +171,6 @@ class AuthController extends Controller
             ], 500);
         }
     }
-    
-
 
     public function getUserName(Request $request)
     {
@@ -192,23 +179,91 @@ class AuthController extends Controller
         ]);
     }
 
-
     public function logout(Request $request)
     {
         $request->user()->tokens()->delete();
         
         return response()->json(['message' => 'Cierre de sesión exitoso']);
     }
- 
-public function profile(Request $request)
-{
-    $user = $request->user();
-    
-    return response()->json([
-        'user' => $user,
-    ]);
-}
 
+    public function profile(Request $request)
+    {
+        $user = $request->user();
+        
+        return response()->json([
+            'user' => $user,
+        ]);
+    }
+
+    // ✅ NUEVO: Obtener perfil completo con estadísticas
+    public function getProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        
+        // Contar sesiones completadas
+        $completedSessions = \App\Models\Session::where('user_id', $user->id)
+            ->where('status', 'completed')
+            ->count();
+        
+        // Contar sesiones activas
+        $activeSessions = \App\Models\Session::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->count();
+        
+        return response()->json([
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'created_at' => $user->created_at->format('F j, Y'), // "January 15, 2024"
+            'sessions_completed' => $completedSessions,
+            'active_sessions' => $activeSessions,
+        ]);
+    }
+    
+    // ✅ NUEVO: Eliminar cuenta del usuario
+    public function deleteAccount(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        
+        try {
+            Log::info('Iniciando eliminación de cuenta', [
+                'user_id' => $user->id,
+                'email' => $user->email
+            ]);
+            
+            // Eliminar todas las sesiones del usuario (cascade eliminará todo lo relacionado)
+            $deletedSessions = \App\Models\Session::where('user_id', $user->id)->delete();
+            
+            Log::info('Sesiones eliminadas', [
+                'user_id' => $user->id,
+                'deleted_sessions' => $deletedSessions
+            ]);
+            
+            // Eliminar tokens de autenticación
+            $user->tokens()->delete();
+            
+            // Eliminar el usuario
+            $user->delete();
+            
+            Log::info('Cuenta eliminada exitosamente', [
+                'user_id' => $user->id
+            ]);
+            
+            return response()->json([
+                'message' => 'Account deleted successfully'
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error al eliminar cuenta', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'message' => 'Error deleting account: ' . $e->getMessage()
+            ], 500);
+        }
+    }
 
     public function forgotPassword(Request $request)
     {

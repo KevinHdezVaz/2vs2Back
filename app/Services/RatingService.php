@@ -34,8 +34,11 @@ class RatingService
         $team1ActualScore = $game->winner_team === 1 ? 1 : 0;
         $team2ActualScore = $game->winner_team === 2 ? 1 : 0;
 
-        // Calcular multiplicador basado en margen de puntos
-        $scoreMargin = abs($game->team1_score - $game->team2_score);
+        // ✅ NUEVO: Calcular scores ajustados para Best of 3
+        $adjustedScores = $this->getAdjustedScoresForRating($game);
+
+        // Calcular multiplicador basado en margen de puntos (usando scores ajustados)
+        $scoreMargin = abs($adjustedScores['team1'] - $adjustedScores['team2']);
         $marginMultiplier = $this->calculateMarginMultiplier($scoreMargin, $game->session->points_per_game);
 
         // Calcular cambio de rating base
@@ -52,6 +55,43 @@ class RatingService
             $player->current_rating += $team2RatingChange;
             $player->save();
         }
+    }
+
+    /**
+     * ✅ NUEVO: Obtener scores ajustados para el cálculo de rating
+     * 
+     * - Best of 1: Usa team1_score y team2_score directamente
+     * - Best of 3 (sin 3er set): Usa team1_score y team2_score directamente
+     * - Best of 3 (CON 3er set): Usa solo 3er set + 20 puntos de buffer
+     */
+    private function getAdjustedScoresForRating(Game $game): array
+    {
+        $session = $game->session;
+
+        // Si NO es Best of 3, usar scores normales
+        if ($session->number_of_sets !== '3') {
+            return [
+                'team1' => $game->team1_score,
+                'team2' => $game->team2_score
+            ];
+        }
+
+        // ✅ Best of 3: Verificar si se jugó el 3er set
+        $playedThirdSet = ($game->team1_set3_score !== null && $game->team2_set3_score !== null);
+
+        if (!$playedThirdSet) {
+            // No se jugó 3er set: usar scores totales normales
+            return [
+                'team1' => $game->team1_score,
+                'team2' => $game->team2_score
+            ];
+        }
+
+        // ✅ SE JUGÓ 3ER SET: Usar solo 3er set + 20 puntos de buffer
+        return [
+            'team1' => 20 + $game->team1_set3_score,
+            'team2' => 20 + $game->team2_set3_score
+        ];
     }
 
     /**
