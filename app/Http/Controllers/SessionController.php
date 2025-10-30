@@ -893,6 +893,91 @@ private function getOptimizedPodiumData(Session $session): array
     ];
 }
 
+
+/**
+ * ✅ NUEVO: Auto-generar finals cuando se complete la última semifinal
+ * Este endpoint se llama automáticamente desde el frontend después de registrar un score
+ */
+public function autoGenerateFinalsIfReady(Session $session): JsonResponse
+{
+    // Verificar autorización
+    if ($session->user_id !== auth()->id()) {
+        return response()->json(['message' => 'No autorizado'], 403);
+    }
+
+    Log::info('🤖 Verificando si auto-generar finals', [
+        'session_id' => $session->id,
+        'session_type' => $session->session_type
+    ]);
+
+    // ✅ P8 NORMAL: Verificar si necesita Gold/Bronze
+    if ($this->isNormalP8NeedingFinals($session)) {
+        Log::info('✅ Auto-generando Gold/Bronze para P8 normal');
+        
+        $semifinals = $session->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'semifinal')
+            ->where('status', 'completed')
+            ->get();
+
+        $newGames = $this->gameGenerator->generateP8Finals($session, $semifinals);
+        
+        $session->updateProgress();
+
+        return response()->json([
+            'auto_generated' => true,
+            'type' => 'p8_finals',
+            'message' => 'Semifinals completed! Gold and Bronze matches have been created.',
+            'new_games_count' => $newGames->count()
+        ]);
+    }
+
+    // ✅ P4: Verificar si necesita Final
+    if ($this->isP4NeedingFinal($session)) {
+        Log::info('✅ Auto-generando Final para P4');
+        
+        $semifinals = $session->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'semifinal')
+            ->where('status', 'completed')
+            ->get();
+
+        $newGames = $this->gameGenerator->generateP4Final($session, $semifinals);
+        
+        $session->updateProgress();
+
+        return response()->json([
+            'auto_generated' => true,
+            'type' => 'p4_final',
+            'message' => 'Semifinals completed! The Final has been created.',
+            'new_games_count' => $newGames->count()
+        ]);
+    }
+
+    // ✅ P8 ESPECIAL: Verificar si necesita Final
+    if ($this->isSpecialP8NeedingFinal($session)) {
+        Log::info('✅ Auto-generando Final para P8 especial');
+        
+        $newGames = $this->gameGenerator->generateSpecialP8Final($session);
+        
+        $session->updateProgress();
+
+        return response()->json([
+            'auto_generated' => true,
+            'type' => 'p8_special_final',
+            'message' => 'Qualifier completed! The Final has been created.',
+            'new_games_count' => $newGames->count()
+        ]);
+    }
+
+    // No hay nada que generar
+    return response()->json([
+        'auto_generated' => false,
+        'message' => 'No finals ready to generate'
+    ]);
+}
+
+
   public function advanceToNextStage(Request $request, Session $session): JsonResponse
 {
     try {

@@ -37,6 +37,10 @@ Route::middleware(['auth:sanctum', 'throttle:300,1'])->group(function () {
     Route::get('/players/all', [SessionController::class, 'getAllPlayers']);
     Route::get('/players/{player}', [SessionController::class, 'getPlayerDetail']);
 
+
+        Route::post('/sessions/{session}/auto-generate-finals', [SessionController::class, 'autoGenerateFinalsIfReady']);
+
+        
     // ✅ Rutas para avanzar entre stages
     Route::prefix('sessions/{session}')->group(function () {
         Route::get('/can-advance', [SessionController::class, 'canAdvance']);
