@@ -8,25 +8,28 @@ use Illuminate\Support\Facades\Log;
 
 class Session extends Model
 {
-    protected $fillable = [
-        'firebase_id',
-        'session_code',
-        'user_id',
-        'session_name',
-        'number_of_courts',
-        'duration_hours',
-        'number_of_players',
-        'points_per_game',
-        'win_by',
-        'number_of_sets',
-        'session_type', // T, P4, P8, O
-        'current_stage', // 1, 2, 3 (for Tournament)
-        'status', // pending, active, completed
-        'started_at',
-        'completed_at',
-        'progress_percentage',
-        'total_games' // ✅ AGREGAR este campo
-    ];
+ protected $fillable = [
+    'firebase_id',
+    'session_code',
+    'moderator_code',      // ← AGREGADO
+    'verification_code',
+    'user_id',
+    'session_name',
+    'number_of_courts',
+    'duration_hours',
+    'number_of_players',
+    'points_per_game',
+    'win_by',              // ← CORREGIDO
+    'number_of_sets',
+    'session_type',
+    'current_stage',
+    'status',
+    'started_at',
+    'completed_at',
+    'progress_percentage',
+    'total_games'
+];
+
 
     protected $casts = [
         'started_at' => 'datetime',
@@ -34,6 +37,68 @@ class Session extends Model
         'progress_percentage' => 'float'
     ];
 
+    // ... (mantener todos los métodos existentes)
+
+    /**
+     * ✅ NUEVO: Generar código de sesión único (6 caracteres)
+     */
+    public static function generateUniqueCode(): string
+    {
+        do {
+            $letters = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ'), 0, 2));
+            $numbers = substr(str_shuffle('123456789'), 0, 4);
+            $code = $letters . $numbers;
+        } while (self::where('session_code', $code)->exists());
+        
+        return $code;
+    }
+
+    /**
+     * ✅ NUEVO: Generar código de verificación (2 dígitos)
+     */
+    public static function generateVerificationCode(): string
+    {
+        return str_pad((string) random_int(10, 99), 2, '0', STR_PAD_LEFT);
+    }
+
+    
+    /**
+     * ✅ NUEVO: Validar código de verificación
+     */
+    public function validateVerificationCode(string $code): bool
+    {
+        return $this->verification_code === $code;
+    }
+
+    /**
+     * ✅ NUEVO: Helper para saber si está en borrador
+     */
+    public function isDraft(): bool
+    {
+        return $this->status === 'draft';
+    }
+
+    /**
+     * ✅ NUEVO: Activar sesión (de draft/pending a active)
+     */
+    public function activate(): void
+    {
+        if ($this->status !== 'active') {
+            $this->status = 'active';
+            $this->started_at = now();
+            $this->save();
+            
+            Log::info('Session activated', [
+                'session_id' => $this->id,
+                'session_code' => $this->session_code,
+                'verification_code' => $this->verification_code
+            ]);
+        }
+    }
+
+    /**
+     * ✅ MÉTODO EXISTENTE - Sin cambios
+     */
     public function courts(): HasMany
     {
         return $this->hasMany(Court::class);
@@ -49,7 +114,6 @@ class Session extends Model
         return $this->hasMany(Game::class);
     }
 
-    // Helper methods
     public function isTournament(): bool
     {
         return $this->session_type === 'T';
@@ -65,16 +129,10 @@ class Session extends Model
         return $this->session_type === 'P8';
     }
 
-    public static function generateUniqueCode(): string
-    {
-        do {
-            $letters = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ'), 0, 2));
-            $numbers = substr(str_shuffle('123456789'), 0, 4);
-            $code = $letters . $numbers;
-        } while (self::where('session_code', $code)->exists());
-        
-        return $code;
-    }
+    public function isSimple(): bool
+{
+    return $this->session_type === 'S';
+}
 
     public function canAdvanceStage(): bool
     {
@@ -184,12 +242,9 @@ class Session extends Model
         return $pendingActiveGames === 0;
     }
 
-    // ✅ MÉTODO ACTUALIZADO
     public function updateProgress(): void
     {
         $completedGames = $this->games()->where('status', 'completed')->count();
-        
-        // ✅ CALCULAR TOTAL REAL DE JUEGOS según tipo de sesión
         $totalGames = $this->calculateTotalExpectedGames();
         
         if ($totalGames > 0) {
@@ -210,143 +265,115 @@ class Session extends Model
         ]);
     }
 
-    /**
-     * ✅ NUEVO MÉTODO: Calcular total esperado de juegos según tipo de sesión
-     */
-  
-    /**
- * ✅ CORREGIDO: Calcular total esperado de juegos según tipo de sesión
- */
-private function calculateTotalExpectedGames(): int
-{
-    // ✅ PARA P8 ESPECIAL (1C2H6P-P8 o 1C2H7P-P8)
-    if ($this->isSpecialP8()) {
-        // Fase regular + 1 Qualifier + 1 Final
-        $regularGames = $this->games()
-            ->where('is_playoff_game', false)
-            ->count();
-        
-        return $regularGames + 2; // +1 Qualifier, +1 Final
-    }
-    
-    // ✅ PARA P8 NORMAL
-    if ($this->isPlayoff8()) {
-        // Fase regular + 2 Semifinals + 2 Finals (Gold + Bronze)
-        $regularGames = $this->games()
-            ->where('is_playoff_game', false)
-            ->count();
-        
-        return $regularGames + 4; // +2 Semifinals, +1 Gold, +1 Bronze
-    }
-    
-    // ✅ PARA P4
-    if ($this->isPlayoff4()) {
-        // Fase regular + 1 Final
-        $regularGames = $this->games()
-            ->where('is_playoff_game', false)
-            ->count();
-        
-        return $regularGames + 1; // +1 Final
-    }
-    
-    // ✅ PARA TOURNAMENT - CARGAR DESDE TEMPLATE
-    if ($this->isTournament()) {
-        $template = $this->loadTemplateForSession();
-        
-        if ($template && isset($template['blocks'])) {
-            $totalGames = 0;
+    private function calculateTotalExpectedGames(): int
+    {
+        if ($this->isSpecialP8()) {
+            $regularGames = $this->games()
+                ->where('is_playoff_game', false)
+                ->count();
             
-            // Contar todos los juegos en todos los bloques (stages)
-            foreach ($template['blocks'] as $block) {
-                foreach ($block['rounds'] as $round) {
-                    // Cada round tiene N courts, cada court = 1 juego
-                    $totalGames += count($round['courts']);
-                }
-            }
-            
-            Log::info('📊 Tournament total games from template', [
-                'session_id' => $this->id,
-                'template_name' => $this->getTemplateName(),
-                'total_games_from_template' => $totalGames,
-                'current_stage' => $this->current_stage,
-                'blocks_count' => count($template['blocks'])
-            ]);
-            
-            return $totalGames;
+            return $regularGames + 2;
         }
         
-        // Fallback: si no hay template, usar juegos actuales
-        Log::warning('⚠️ Template not found for tournament - using current games count', [
-            'session_id' => $this->id,
-            'template_name' => $this->getTemplateName()
-        ]);
+        if ($this->isPlayoff8()) {
+            $regularGames = $this->games()
+                ->where('is_playoff_game', false)
+                ->count();
+            
+            return $regularGames + 4;
+        }
+        
+        if ($this->isPlayoff4()) {
+            $regularGames = $this->games()
+                ->where('is_playoff_game', false)
+                ->count();
+            
+            return $regularGames + 1;
+        }
+        
+        if ($this->isTournament()) {
+            $template = $this->loadTemplateForSession();
+            
+            if ($template && isset($template['blocks'])) {
+                $totalGames = 0;
+                
+                foreach ($template['blocks'] as $block) {
+                    foreach ($block['rounds'] as $round) {
+                        $totalGames += count($round['courts']);
+                    }
+                }
+                
+                Log::info('📊 Tournament total games from template', [
+                    'session_id' => $this->id,
+                    'template_name' => $this->getTemplateName(),
+                    'total_games_from_template' => $totalGames,
+                    'current_stage' => $this->current_stage,
+                    'blocks_count' => count($template['blocks'])
+                ]);
+                
+                return $totalGames;
+            }
+            
+            Log::warning('⚠️ Template not found for tournament - using current games count', [
+                'session_id' => $this->id,
+                'template_name' => $this->getTemplateName()
+            ]);
+            
+            return $this->games()->count();
+        }
         
         return $this->games()->count();
     }
-    
-    // ✅ PARA OPTIMIZED
-    // Todos los juegos ya están generados al inicio
-    return $this->games()->count();
-}
 
-/**
- * ✅ NUEVO MÉTODO: Cargar template desde JSON (reutiliza lógica del GameGeneratorService)
- */
-private function loadTemplateForSession(): ?array
-{
-    $filename = $this->getTemplateName();
-    $path = storage_path("app/game_templates/{$filename}.json");
+    private function loadTemplateForSession(): ?array
+    {
+        $filename = $this->getTemplateName();
+        $path = storage_path("app/game_templates/{$filename}.json");
 
-    if (!file_exists($path)) {
-        Log::warning('Template file not found', [
-            'session_id' => $this->id,
-            'template_name' => $filename,
-            'path' => $path
-        ]);
-        return null;
-    }
-
-    try {
-        $content = file_get_contents($path);
-        $template = json_decode($content, true);
-        
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            Log::error('Error decoding template JSON', [
+        if (!file_exists($path)) {
+            Log::warning('Template file not found', [
                 'session_id' => $this->id,
                 'template_name' => $filename,
-                'error' => json_last_error_msg()
+                'path' => $path
             ]);
             return null;
         }
-        
-        return $template;
-    } catch (\Exception $e) {
-        Log::error('Error loading template', [
-            'session_id' => $this->id,
-            'template_name' => $filename,
-            'error' => $e->getMessage()
-        ]);
-        return null;
+
+        try {
+            $content = file_get_contents($path);
+            $template = json_decode($content, true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                Log::error('Error decoding template JSON', [
+                    'session_id' => $this->id,
+                    'template_name' => $filename,
+                    'error' => json_last_error_msg()
+                ]);
+                return null;
+            }
+            
+            return $template;
+        } catch (\Exception $e) {
+            Log::error('Error loading template', [
+                'session_id' => $this->id,
+                'template_name' => $filename,
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
     }
-}
 
-/**
- * ✅ NUEVO MÉTODO: Obtener nombre del template
- */
-private function getTemplateName(): string
-{
-    return sprintf(
-        '%dC%dH%dP-%s',
-        $this->number_of_courts,
-        $this->duration_hours,
-        $this->number_of_players,
-        $this->session_type
-    );
-}
+    private function getTemplateName(): string
+    {
+        return sprintf(
+            '%dC%dH%dP-%s',
+            $this->number_of_courts,
+            $this->duration_hours,
+            $this->number_of_players,
+            $this->session_type
+        );
+    }
 
-    /**
-     * ✅ NUEVO MÉTODO: Detectar si es P8 especial
-     */
     private function isSpecialP8(): bool
     {
         if (!$this->isPlayoff8()) {

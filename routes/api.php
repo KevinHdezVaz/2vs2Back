@@ -7,14 +7,24 @@ use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SessionController;
 use App\Http\Controllers\GameController;
 
+// ========================================
+// RUTAS PÚBLICAS (sin autenticación)
+// ========================================
+
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 Route::post('/google-login', [AuthController::class, 'googleLogin']);
 
+// Buscar sesión por código (Espectadores)
 Route::get('/sessions/code/{code}', [SessionController::class, 'findByCode']);
 
+// ✅ NUEVO: Login de Moderador (público pero requiere códigos)
+Route::post('/moderator/login', [SessionController::class, 'moderatorLogin']);
+Route::post('/sessions/moderator-login-verification', [SessionController::class, 'moderatorLoginWithVerification']); // Ambos códigos
+Route::post('/sessions/moderator-login-session-code', [SessionController::class, 'moderatorLoginWithSessionCode']); // ← NUEVO: Session Code + Verification
+// Rutas públicas para espectadores
 Route::prefix('public')->middleware('throttle:300,1')->group(function () {
     Route::get('/sessions/active', [SessionController::class, 'getPublicActiveSessions']);
     Route::get('/sessions/{session}', [SessionController::class, 'getPublicSession']);
@@ -22,26 +32,47 @@ Route::prefix('public')->middleware('throttle:300,1')->group(function () {
     Route::get('/sessions/{session}/players', [SessionController::class, 'getPublicPlayerStats']);
 });
 
-
-// Rutas PÚBLICAS para espectadores
-Route::prefix('public')->middleware('throttle:300,1')->group(function () {
-    Route::get('/sessions/active', [SessionController::class, 'getPublicActiveSessions']);
-    Route::get('/sessions/{session}', [SessionController::class, 'getPublicSession']);
-    Route::get('/sessions/{session}/games/{status}', [SessionController::class, 'getPublicGamesByStatus']);
-    Route::get('/sessions/{session}/players', [SessionController::class, 'getPublicPlayerStats']);
-});
+// ========================================
+// RUTAS AUTENTICADAS
+// ========================================
 
 Route::middleware(['auth:sanctum', 'throttle:300,1'])->group(function () {
-    // HISTORY Y PLAYERS
+    
+
+        Route::get('/sessions/history', [SessionController::class, 'getUserHistory']);
+// En routes/api.php
+     // ========================================
+    // SESIONES - CRUD Básico
+    // ========================================
+    Route::prefix('sessions')->group(function () {
+        Route::post('/', [SessionController::class, 'store']); // Crear sesión (ahora con soporte para draft)
+        Route::get('/active', [SessionController::class, 'activeSessions']); // Sesiones activas
+        Route::get('/{session}', [SessionController::class, 'show']); // Ver sesión
+        Route::post('/{session}/start', [SessionController::class, 'start']); // Iniciar sesión
+        Route::get('/{session}/games/{status}', [SessionController::class, 'getGamesByStatus']);
+        Route::get('/{session}/stats', [SessionController::class, 'getPlayerStats']);
+    });
+
+    // ========================================
+    // ✅ NUEVO: BORRADORES (NEW-DRFT-001)
+    // ========================================
+    Route::prefix('drafts')->group(function () {
+        Route::get('/', [SessionController::class, 'getDrafts']); // Listar borradores
+        Route::post('/{session}/activate', [SessionController::class, 'activateDraft']); // Activar borrador
+        Route::put('/{session}', [SessionController::class, 'updateDraft']); // Editar borrador
+        Route::delete('/{session}', [SessionController::class, 'deleteDraft']); // Eliminar borrador
+    });
+
+    // ========================================
+    // HISTORIAL Y JUGADORES
+    // ========================================
     Route::get('/sessions/history', [SessionController::class, 'getHistory']);
     Route::get('/players/all', [SessionController::class, 'getAllPlayers']);
     Route::get('/players/{player}', [SessionController::class, 'getPlayerDetail']);
 
-
-        Route::post('/sessions/{session}/auto-generate-finals', [SessionController::class, 'autoGenerateFinalsIfReady']);
-
-        
-    // ✅ Rutas para avanzar entre stages
+    // ========================================
+    // AVANCE DE ETAPAS Y PLAYOFFS
+    // ========================================
     Route::prefix('sessions/{session}')->group(function () {
         Route::get('/can-advance', [SessionController::class, 'canAdvance']);
         Route::post('/advance-stage', [SessionController::class, 'advanceStage']); // Para Torneos
@@ -49,33 +80,26 @@ Route::middleware(['auth:sanctum', 'throttle:300,1'])->group(function () {
         Route::post('/generate-playoff-bracket', [SessionController::class, 'generatePlayoffBracket']);
         Route::post('/generate-p8-finals', [SessionController::class, 'generateP8Finals']);
         Route::post('/finalize', [SessionController::class, 'finalizeSession']);
+        Route::post('/auto-generate-finals', [SessionController::class, 'autoGenerateFinalsIfReady']);
         Route::get('/primary-active-game', [GameController::class, 'getPrimaryActiveGame']);
     });
 
-    // Rutas de sesiones
-    Route::prefix('sessions')->group(function () {
-        Route::post('/', [SessionController::class, 'store']);
-        Route::get('/active', [SessionController::class, 'activeSessions']);
-        Route::get('/{session}', [SessionController::class, 'show']);
-        Route::post('/{session}/start', [SessionController::class, 'start']);
-        Route::get('/{session}/games/{status}', [SessionController::class, 'getGamesByStatus']);
-        Route::get('/{session}/stats', [SessionController::class, 'getPlayerStats']);
-    });
-
-
-     Route::get('/user/profile', [AuthController::class, 'getProfile']);
-    Route::delete('/user/account', [AuthController::class, 'deleteAccount']);
-    
-    // Rutas de juegos
-    Route::put('games/{game}/update-score', [GameController::class, 'updateScore']);
-    Route::post('games/{game}/skip-to-court', [GameController::class, 'skipToCourt']);
-
+    // ========================================
+    // JUEGOS
+    // ========================================
     Route::prefix('games')->group(function () {
         Route::post('/{game}/start', [GameController::class, 'start']);
         Route::post('/{game}/score', [GameController::class, 'submitScore']);
         Route::post('/{game}/cancel', [GameController::class, 'cancel']);
+        Route::put('/{game}/update-score', [GameController::class, 'updateScore']);
+        Route::post('/{game}/skip-to-court', [GameController::class, 'skipToCourt']);
     });
 
+    // ========================================
+    // USUARIO Y PERFIL
+    // ========================================
+    Route::get('/user/profile', [AuthController::class, 'getProfile']);
+    Route::delete('/user/account', [AuthController::class, 'deleteAccount']);
     Route::get('/user/name', [AuthController::class, 'getUserName']);
     Route::post('/user/update-onesignal-id', function (Request $request) {
         $user = Auth::user();

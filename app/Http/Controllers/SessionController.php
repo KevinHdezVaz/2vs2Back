@@ -8,7 +8,6 @@ use App\Models\Session;
 use Illuminate\Http\Request;
 use App\Services\RatingService;
 use App\Models\Game;
-
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
 use App\Http\Controllers\Controller;
@@ -17,227 +16,560 @@ use App\Services\GameGeneratorService;
 class SessionController extends Controller
 {
     public function __construct(
-          private GameGeneratorService $gameGenerator,
-    private RatingService $ratingService
+        private GameGeneratorService $gameGenerator,
+        private RatingService $ratingService
     ) {}
 
     /**
-     * Crear nueva sesión
+     * ✅ ACTUALIZADO: Crear nueva sesión con soporte para draft y verification_code
      */
-    
-public function store(Request $request): JsonResponse
-{
-    \Log::info('Request data received:', $request->all());
-    
-    try {
-      
-$validated = $request->validate([
-    'session_name' => 'required|string|max:255',
-    'number_of_courts' => 'required|integer|min:1|max:4',
-    'duration_hours' => 'required|integer|min:1|max:3',
-    'number_of_players' => 'required|integer',
-    'points_per_game' => 'required|integer|in:7,11,15,21',
-    'win_by' => 'required|integer|in:1,2',
-    'number_of_sets' => 'required|string|in:1,3', // ✅ CAMBIO: Solo permitir 1 o 3
-    'session_type' => 'required|string|in:T,P4,P8,O',
-    'courts' => 'required|array',
-    'courts.*.court_name' => 'required|string',
-    'players' => 'required|array',
-    'players.*.first_name' => 'required|string',
-    'players.*.last_initial' => 'required|string|max:50',
-    'players.*.level' => 'nullable|string',
-    'players.*.dominant_hand' => 'nullable|string',
-]);
-    } catch (\Illuminate\Validation\ValidationException $e) {
-        \Log::error('Validation error:', [
-            'errors' => $e->errors(),
-            'message' => $e->getMessage()
-        ]);
+    public function store(Request $request): JsonResponse
+    {
+        \Log::info('Request data received:', $request->all());
         
-        return response()->json([
-            'message' => 'Validation error',
-            'errors' => $e->errors()
-        ], 422);
-    }
-    
-    \Log::info('Data validated:', $validated);
-
-    // ✅ VALIDATION: Create temporary session to validate configuration
-    $tempSession = new Session([
-        'number_of_courts' => $validated['number_of_courts'],
-        'duration_hours' => $validated['duration_hours'],
-        'number_of_players' => $validated['number_of_players'],
-        'session_type' => $validated['session_type'],
-    ]);
-
-    $validation = $this->gameGenerator->validateSessionConfiguration($tempSession);
-    
-    if (!$validation['valid']) {
-        \Log::warning('Configuration validation failed:', ['message' => $validation['message']]);
-        return response()->json([
-            'message' => $validation['message']
-        ], 422);
-    }
-
-    // Validate player count based on courts
-    $minPlayers = $validated['number_of_courts'] * 4;
-    $maxPlayers = $validated['number_of_courts'] * 8;
-    
-    if ($validated['number_of_players'] < $minPlayers || 
-        $validated['number_of_players'] > $maxPlayers) {
-        return response()->json([
-            'message' => "Number of players must be between {$minPlayers} and {$maxPlayers}"
-        ], 422);
-    }
-
-    // Create in MySQL
-    $session = Session::create([
-        'firebase_id' => uniqid('session_'),
-        'session_code' => Session::generateUniqueCode(), // ✅ AGREGAR
-        'user_id' => $request->user()->id,
-        'session_name' => $validated['session_name'],
-        'number_of_courts' => $validated['number_of_courts'],
-        'duration_hours' => $validated['duration_hours'],
-        'number_of_players' => $validated['number_of_players'],
-        'points_per_game' => $validated['points_per_game'],
-        'win_by' => $validated['win_by'],
-        'number_of_sets' => $validated['number_of_sets'],
-        'session_type' => $validated['session_type'],
-        'status' => 'pending'
-    ]);
-
-    // Create courts
-    foreach ($validated['courts'] as $index => $courtData) {
-        Court::create([
-            'session_id' => $session->id,
-            'court_name' => $courtData['court_name'],
-            'court_number' => $index + 1
-        ]);
-    }
-
-    // Create players
-    foreach ($validated['players'] as $playerData) {
-        $player = Player::create([
-            'session_id' => $session->id,
-            'first_name' => $playerData['first_name'],
-            'last_initial' => strtoupper($playerData['last_initial']),
-            'level' => $playerData['level'] ?? 'Average',
-            'dominant_hand' => $playerData['dominant_hand'] ?? 'None'
-        ]);
-
-        $player->initial_rating = $player->getInitialRatingByLevel();
-        $player->current_rating = $player->initial_rating;
-        $player->save();
-    }
-
-    \Log::info('Session created, now generating games', ['session_id' => $session->id]);
-
-    // ✅ GENERAR JUEGOS INICIALES
-    try {
-        $games = collect();
-        
-        if ($session->isPlayoff4() || $session->isPlayoff8()) {
-            // Para P4/P8: generar fase regular
-             
-
-            // ✅ CORRECTO
-     $games = $this->gameGenerator->generateAllGames($session); // ← USA ESTE
-
-            Log::info('Regular phase games generated', [
-                'session_id' => $session->id,
-                'session_type' => $session->session_type,
-                'games_count' => $games->count()
+        try {
+            $validated = $request->validate([
+                'session_name' => 'required|string|max:255',
+                'number_of_courts' => 'required|integer|min:1|max:4',
+                'duration_hours' => 'required|integer|min:1|max:3',
+                'number_of_players' => 'required|integer',
+                'points_per_game' => 'required|integer|in:7,11,15,21',
+                'win_by' => 'required|integer|in:1,2',
+                'number_of_sets' => 'required|string|in:1,3',
+                'session_type' => 'required|string|in:T,P4,P8,O,S',
+                'courts' => 'required|array',
+                'courts.*.court_name' => 'required|string',
+                'players' => 'required|array',
+                'players.*.first_name' => 'required|string',
+                'players.*.last_initial' => 'required|string|max:50',
+                'players.*.level' => 'nullable|string',
+                'players.*.dominant_hand' => 'nullable|string',
+                'save_as_draft' => 'nullable|boolean', // ✅ NUEVO
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Log::error('Validation error:', [
+                'errors' => $e->errors(),
+                'message' => $e->getMessage()
             ]);
             
-        } elseif ($session->isTournament()) {
-    // ✅ INICIALIZAR current_stage para Tournament
-    $session->current_stage = 1;
-    $session->save();
-    
-    // Para Tournament: generar Stage 1
-    $games = $this->gameGenerator->generateStageGames($session);
-    
-    Log::info('Stage 1 games generated', [
-        'session_id' => $session->id,
-        'current_stage' => $session->current_stage,
-        'games_count' => $games->count()
-    ]);
-            
-        } else {
-            // Para Optimized: generar todos los juegos
-            $games = $this->gameGenerator->generateAllGames($session);
-            
-            Log::info('Optimized games generated', [
+            return response()->json([
+                'message' => 'Validation error',
+                'errors' => $e->errors()
+            ], 422);
+        }
+        
+        \Log::info('Data validated:', $validated);
+
+        // Validar configuración del template
+        $tempSession = new Session([
+            'number_of_courts' => $validated['number_of_courts'],
+            'duration_hours' => $validated['duration_hours'],
+            'number_of_players' => $validated['number_of_players'],
+            'session_type' => $validated['session_type'],
+        ]);
+
+        $validation = $this->gameGenerator->validateSessionConfiguration($tempSession);
+        
+        if (!$validation['valid']) {
+            \Log::warning('Configuration validation failed:', ['message' => $validation['message']]);
+            return response()->json([
+                'message' => $validation['message']
+            ], 422);
+        }
+
+        // Validar cantidad de jugadores
+        $minPlayers = $validated['number_of_courts'] * 4;
+        $maxPlayers = $validated['number_of_courts'] * 8;
+        
+        if ($validated['number_of_players'] < $minPlayers || 
+            $validated['number_of_players'] > $maxPlayers) {
+            return response()->json([
+                'message' => "Number of players must be between {$minPlayers} and {$maxPlayers}"
+            ], 422);
+        }
+
+        // ✅ DETERMINAR STATUS: draft o pending (si save_as_draft = true)
+        $saveAsDraft = $validated['save_as_draft'] ?? false;
+        $initialStatus = $saveAsDraft ? 'draft' : 'pending';
+
+        // ✅ Crear sesión con códigos generados automáticamente
+        $session = Session::create([
+            'firebase_id' => uniqid('session_'),
+            'session_code' => Session::generateUniqueCode(),
+            'moderator_code' => Session::generateUniqueCode(),
+            'verification_code' => Session::generateVerificationCode(), // ✅ NUEVO
+            'user_id' => $request->user()->id,
+            'session_name' => $validated['session_name'],
+            'number_of_courts' => $validated['number_of_courts'],
+            'duration_hours' => $validated['duration_hours'],
+            'number_of_players' => $validated['number_of_players'],
+            'points_per_game' => $validated['points_per_game'],
+            'win_by' => $validated['win_by'],
+            'number_of_sets' => $validated['number_of_sets'],
+            'session_type' => $validated['session_type'],
+            'status' => $initialStatus // ✅ NUEVO: draft o pending
+        ]);
+
+        // Crear canchas
+        foreach ($validated['courts'] as $index => $courtData) {
+            Court::create([
                 'session_id' => $session->id,
-                'games_count' => $games->count()
+                'court_name' => $courtData['court_name'],
+                'court_number' => $index + 1
             ]);
         }
 
-        // Verificar que se generaron juegos
-        if ($games->isEmpty()) {
-            throw new \Exception('No games were generated');
+        // Crear jugadores
+        foreach ($validated['players'] as $playerData) {
+            $player = Player::create([
+                'session_id' => $session->id,
+                'first_name' => $playerData['first_name'],
+                'last_initial' => strtoupper($playerData['last_initial']),
+                'level' => $playerData['level'] ?? 'Average',
+                'dominant_hand' => $playerData['dominant_hand'] ?? 'None'
+            ]);
+
+            $player->initial_rating = $player->getInitialRatingByLevel();
+            $player->current_rating = $player->initial_rating;
+            $player->save();
         }
 
-        // ✅ Asignar canchas a los primeros N juegos
-        $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
-        
-        Log::info('Assigning courts to initial games', [
-            'available_courts' => $courts->count(),
-            'games_to_assign' => min($courts->count(), $games->count())
-        ]);
-        
-        foreach ($games->take($courts->count()) as $index => $game) {
-            if (isset($courts[$index])) {
-                $game->court_id = $courts[$index]->id;
-                $game->save();
+        // ✅ SI ES BORRADOR, NO GENERAR JUEGOS NI ACTIVAR
+        if ($saveAsDraft) {
+            Log::info('Session saved as draft', [
+                'session_id' => $session->id,
+                'session_code' => $session->session_code,
+                'moderator_code' => $session->moderator_code,
+                'verification_code' => $session->verification_code
+            ]);
+
+            return response()->json([
+                'message' => 'Session saved as draft successfully',
+                'session' => $session->load(['courts', 'players']),
+                'session_code' => $session->session_code,
+                'moderator_code' => $session->moderator_code,
+                'verification_code' => $session->verification_code,
+                'is_draft' => true
+            ], 201);
+        }
+
+        // ✅ SI NO ES BORRADOR, GENERAR JUEGOS Y ACTIVAR (lógica existente)
+        \Log::info('Session created, now generating games', ['session_id' => $session->id]);
+
+        try {
+            $games = collect();
+            
+            if ($session->isPlayoff4() || $session->isPlayoff8()) {
+                $games = $this->gameGenerator->generateAllGames($session);
                 
-                Log::info('Court assigned to game', [
-                    'game_id' => $game->id,
-                    'game_number' => $game->game_number,
-                    'court_id' => $courts[$index]->id,
-                    'court_name' => $courts[$index]->court_name
+                Log::info('Regular phase games generated', [
+                    'session_id' => $session->id,
+                    'session_type' => $session->session_type,
+                    'games_count' => $games->count()
+                ]);
+                
+            } elseif ($session->isTournament()) {
+                $session->current_stage = 1;
+                $session->save();
+                
+                $games = $this->gameGenerator->generateStageGames($session);
+                
+                Log::info('Stage 1 games generated', [
+                    'session_id' => $session->id,
+                    'current_stage' => $session->current_stage,
+                    'games_count' => $games->count()
+                ]);
+                
+            } else {
+                $games = $this->gameGenerator->generateAllGames($session);
+                
+                Log::info('Optimized games generated', [
+                    'session_id' => $session->id,
+                    'games_count' => $games->count()
                 ]);
             }
+
+            if ($games->isEmpty()) {
+                throw new \Exception('No games were generated');
+            }
+
+            // Asignar canchas a los primeros N juegos
+            $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
+            
+            Log::info('Assigning courts to initial games', [
+                'available_courts' => $courts->count(),
+                'games_to_assign' => min($courts->count(), $games->count())
+            ]);
+            
+            foreach ($games->take($courts->count()) as $index => $game) {
+                if (isset($courts[$index])) {
+                    $game->court_id = $courts[$index]->id;
+                    $game->save();
+                    
+                    Log::info('Court assigned to game', [
+                        'game_id' => $game->id,
+                        'game_number' => $game->game_number,
+                        'court_id' => $courts[$index]->id,
+                        'court_name' => $courts[$index]->court_name
+                    ]);
+                }
+            }
+
+            // Cambiar status a active
+            $session->status = 'active';
+            $session->started_at = now();
+            $session->save();
+
+            $session->updateProgress();
+
+            Log::info('Session activated successfully', [
+                'session_id' => $session->id,
+                'status' => $session->status,
+                'started_at' => $session->started_at,
+                'total_games' => $games->count(),
+                'session_code' => $session->session_code,
+                'verification_code' => $session->verification_code
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error generating games or activating session', [
+                'session_id' => $session->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Rollback
+            $session->courts()->delete();
+            $session->players()->delete();
+            $session->delete();
+            
+            return response()->json([
+                'message' => 'Error generating games: ' . $e->getMessage()
+            ], 500);
         }
 
-        // ✅ Cambiar status a active y establecer started_at
-        $session->status = 'active';
-        $session->started_at = now();
-        $session->save();
+        return response()->json([
+            'message' => 'Session created successfully',
+            'session' => $session->load(['courts', 'players', 'games']),
+            'session_code' => $session->session_code,
+            'verification_code' => $session->verification_code, // ✅ INCLUIR
+            'is_draft' => false
+        ], 201);
+    }
 
-        // ✅ Actualizar progreso inicial
-        $session->updateProgress();
+    /**
+     * ✅ NUEVO: Activar sesión desde borrador
+     */
+    public function activateDraft(Session $session): JsonResponse
+    {
+        // Verificar que sea el dueño
+        if ($session->user_id !== auth()->id()) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
 
-        Log::info('Session activated successfully', [
+        // Verificar que esté en draft
+        if (!$session->isDraft()) {
+            return response()->json([
+                'message' => 'Only draft sessions can be activated'
+            ], 422);
+        }
+
+        Log::info('Activating draft session', [
             'session_id' => $session->id,
-            'status' => $session->status,
-            'started_at' => $session->started_at,
-            'total_games' => $games->count()
+            'session_code' => $session->session_code
         ]);
 
-    } catch (\Exception $e) {
-        Log::error('Error generating games or activating session', [
-            'session_id' => $session->id,
-            'error' => $e->getMessage(),
-            'trace' => $e->getTraceAsString()
+        try {
+            $games = collect();
+            
+            // Generar juegos según tipo de sesión
+            if ($session->isPlayoff4() || $session->isPlayoff8()) {
+                $games = $this->gameGenerator->generateAllGames($session);
+            } elseif ($session->isTournament()) {
+                $session->current_stage = 1;
+                $session->save();
+                $games = $this->gameGenerator->generateStageGames($session);
+            } else {
+                $games = $this->gameGenerator->generateAllGames($session);
+            }
+
+            if ($games->isEmpty()) {
+                throw new \Exception('No games were generated');
+            }
+
+            // Asignar canchas
+            $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
+            
+            foreach ($games->take($courts->count()) as $index => $game) {
+                if (isset($courts[$index])) {
+                    $game->court_id = $courts[$index]->id;
+                    $game->save();
+                }
+            }
+
+            // Activar sesión
+            $session->activate(); // Usa el método del modelo
+            $session->updateProgress();
+
+            Log::info('Draft session activated successfully', [
+                'session_id' => $session->id,
+                'total_games' => $games->count()
+            ]);
+
+            return response()->json([
+                'message' => 'Session activated successfully',
+                'session' => $session->load(['courts', 'players', 'games'])
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error activating draft session', [
+                'session_id' => $session->id,
+                'error' => $e->getMessage()
+            ]);
+            
+            return response()->json([
+                'message' => 'Error activating session: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ NUEVO: Login de moderador con código de sesión + verification code
+     */
+ public function moderatorLogin(Request $request): JsonResponse
+{
+    $validated = $request->validate([
+        'moderator_code' => 'required|string|size:6'
+    ]);
+
+    // ✅ BUSCAR POR MODERATOR_CODE (no session_code)
+    $session = Session::where('moderator_code', strtoupper($validated['moderator_code']))
+        ->whereIn('status', ['active', 'pending']) // ← Permitir pending también
+        ->first();
+
+    if (!$session) {
+        return response()->json([
+            'message' => 'Session not found or not active'
+        ], 404);
+    }
+
+    // ✅ YA NO NECESITA verification_code - el moderator_code es suficiente
+
+    Log::info('Moderator logged in successfully', [
+        'session_id' => $session->id,
+        'moderator_code' => $session->moderator_code,
+        'user_id' => $request->user()->id ?? 'guest'
+    ]);
+
+    $elapsedSeconds = $session->started_at 
+    ? ($session->status === 'completed' && $session->completed_at
+        ? $session->started_at->diffInSeconds($session->completed_at)
+        : now()->diffInSeconds($session->started_at))
+    : 0;
+
+    return response()->json([
+        'message' => 'Moderator access granted',
+        'session' => $session->load([
+            'courts',
+            'players' => function($query) {
+                $query->orderBy('current_rank');
+            }
+        ]),
+        'elapsed_seconds' => $elapsedSeconds,
+        'is_moderator' => true,
+        'is_owner' => $session->user_id === ($request->user()->id ?? null)
+    ]);
+}
+
+
+/**
+ * ✅ NUEVO: Login de moderador con SESSION_CODE + VERIFICATION_CODE
+ * Este método permite a cualquiera con el Session Code (espectador) + Verification Code
+ * obtener acceso de moderador
+ */
+public function moderatorLoginWithSessionCode(Request $request): JsonResponse
+{
+    $validated = $request->validate([
+        'session_code' => 'required|string|size:6',
+        'verification_code' => 'required|string|size:2'
+    ]);
+
+    // ✅ BUSCAR POR SESSION_CODE (el código público de espectador)
+    $session = Session::where('session_code', strtoupper($validated['session_code']))
+        ->where('verification_code', $validated['verification_code'])
+        ->whereIn('status', ['active', 'pending'])
+        ->first();
+
+    if (!$session) {
+        return response()->json([
+            'message' => 'Invalid session code or verification code'
+        ], 404);
+    }
+
+    Log::info('Moderator logged in with session code + verification', [
+        'session_id' => $session->id,
+        'session_code' => $session->session_code,
+        'verification_code' => $session->verification_code,
+        'user_id' => $request->user()->id ?? 'guest'
+    ]);
+
+    // ✅ Calcular elapsed_seconds correctamente
+    $elapsedSeconds = $session->started_at 
+        ? ($session->status === 'completed' && $session->completed_at
+            ? $session->started_at->diffInSeconds($session->completed_at)
+            : now()->diffInSeconds($session->started_at))
+        : 0;
+
+    return response()->json([
+        'message' => 'Moderator access granted',
+        'session' => $session->load([
+            'courts',
+            'players' => function($query) {
+                $query->orderBy('current_rank');
+            }
+        ]),
+        'elapsed_seconds' => $elapsedSeconds,
+        'is_moderator' => true,
+        'is_owner' => $session->user_id === ($request->user()->id ?? null)
+    ]);
+}
+
+/**
+ * ✅ NUEVO: Login de moderador con verificación de 2 códigos
+ */
+public function moderatorLoginWithVerification(Request $request): JsonResponse
+{
+    $validated = $request->validate([
+        'moderator_code' => 'required|string|size:6',
+        'verification_code' => 'required|string|size:2'
+    ]);
+
+    // ✅ BUSCAR POR MODERATOR_CODE + VERIFICATION_CODE
+    $session = Session::where('moderator_code', strtoupper($validated['moderator_code']))
+        ->where('verification_code', $validated['verification_code'])
+        ->whereIn('status', ['active', 'pending'])
+        ->first();
+
+    if (!$session) {
+        return response()->json([
+            'message' => 'Invalid moderator code or verification code'
+        ], 404);
+    }
+
+    Log::info('Moderator logged in with verification', [
+        'session_id' => $session->id,
+        'moderator_code' => $session->moderator_code,
+        'verification_code' => $session->verification_code,
+        'user_id' => $request->user()->id ?? 'guest'
+    ]);
+
+    $elapsedSeconds = $session->started_at 
+    ? ($session->status === 'completed' && $session->completed_at
+        ? $session->started_at->diffInSeconds($session->completed_at)
+        : now()->diffInSeconds($session->started_at))
+    : 0;
+
+    return response()->json([
+        'message' => 'Moderator access granted',
+        'session' => $session->load([
+            'courts',
+            'players' => function($query) {
+                $query->orderBy('current_rank');
+            }
+        ]),
+        'elapsed_seconds' => $elapsedSeconds,
+        'is_moderator' => true,
+        'is_owner' => $session->user_id === ($request->user()->id ?? null)
+    ]);
+}
+
+
+    /**
+     * ✅ NUEVO: Listar borradores del usuario
+     */
+    public function getDrafts(Request $request): JsonResponse
+    {
+        $drafts = Session::where('user_id', $request->user()->id)
+            ->where('status', 'draft')
+            ->with(['courts', 'players'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json(['drafts' => $drafts]);
+    }
+
+    /**
+     * ✅ NUEVO: Actualizar borrador
+     */
+    public function updateDraft(Request $request, Session $session): JsonResponse
+    {
+        // Verificar autorización
+        if ($session->user_id !== auth()->id()) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        // Verificar que sea borrador
+        if (!$session->isDraft()) {
+            return response()->json([
+                'message' => 'Only draft sessions can be updated'
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'session_name' => 'nullable|string|max:255',
+            'number_of_courts' => 'nullable|integer|min:1|max:4',
+            'duration_hours' => 'nullable|integer|min:1|max:3',
+            'number_of_players' => 'nullable|integer',
+            'points_per_game' => 'nullable|integer|in:7,11,15,21',
+            'win_by' => 'nullable|integer|in:1,2',
+            'number_of_sets' => 'nullable|string|in:1,3',
         ]);
-        
-        // Rollback: eliminar sesión si falla la generación de juegos
+
+        $session->update(array_filter($validated));
+
+        Log::info('Draft session updated', [
+            'session_id' => $session->id,
+            'updated_fields' => array_keys(array_filter($validated))
+        ]);
+
+        return response()->json([
+            'message' => 'Draft updated successfully',
+            'session' => $session->load(['courts', 'players'])
+        ]);
+    }
+
+    /**
+     * ✅ NUEVO: Eliminar borrador
+     */
+    public function deleteDraft(Session $session): JsonResponse
+    {
+        // Verificar autorización
+        if ($session->user_id !== auth()->id()) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        // Verificar que sea borrador
+        if (!$session->isDraft()) {
+            return response()->json([
+                'message' => 'Only draft sessions can be deleted'
+            ], 422);
+        }
+
+        Log::info('Deleting draft session', [
+            'session_id' => $session->id,
+            'session_name' => $session->session_name
+        ]);
+
+        // Eliminar canchas, jugadores y sesión
         $session->courts()->delete();
         $session->players()->delete();
         $session->delete();
-        
-        return response()->json([
-            'message' => 'Error generating games: ' . $e->getMessage()
-        ], 500);
-    }
 
-   return response()->json([
-        'message' => 'Session created successfully',
-        'session' => $session->load(['courts', 'players', 'games']),
-        'session_code' => $session->session_code, // ✅ INCLUIR EN RESPUESTA
-    ], 201);
-}
+        return response()->json([
+            'message' => 'Draft deleted successfully'
+        ]);
+    }
+ 
 
 // app/Http/Controllers/SessionController.php
 
@@ -257,8 +589,10 @@ public function findByCode(string $code): JsonResponse
     }
     
     $elapsedSeconds = $session->started_at 
-        ? now()->diffInSeconds($session->started_at) 
-        : 0;
+    ? ($session->status === 'completed' && $session->completed_at
+        ? $session->started_at->diffInSeconds($session->completed_at)
+        : now()->diffInSeconds($session->started_at))
+    : 0;
 
     return response()->json([
         'session' => $session->load([
@@ -432,8 +766,10 @@ public function getPublicActiveSessions(): JsonResponse
 public function getPublicSession(Session $session): JsonResponse
 {
     $elapsedSeconds = $session->started_at 
-        ? now()->diffInSeconds($session->started_at) 
-        : 0;
+    ? ($session->status === 'completed' && $session->completed_at
+        ? $session->started_at->diffInSeconds($session->completed_at)
+        : now()->diffInSeconds($session->started_at))
+    : 0;
 
     return response()->json([
         'session' => $session->load([
@@ -474,23 +810,40 @@ public function getPublicPlayerStats(Session $session): JsonResponse
     /** 
      * Obtener detalles de sesión
      */
-    public function show(Session $session): JsonResponse
+  // app/Http/Controllers/SessionController.php
+
+public function show(Session $session): JsonResponse
 {
+    // ✅ VERIFICAR SI EL USUARIO ES EL DUEÑO
+    $isOwner = $session->user_id === auth()->id();
+
     $elapsedSeconds = $session->started_at 
-        ? now()->diffInSeconds($session->started_at) 
-        : 0;
+    ? ($session->status === 'completed' && $session->completed_at
+        ? $session->started_at->diffInSeconds($session->completed_at)
+        : now()->diffInSeconds($session->started_at))
+    : 0;
+
+    // ✅ PREPARAR DATOS DE LA SESIÓN
+    $sessionData = $session->load([
+        'courts',
+        'players' => function($query) {
+            $query->orderBy('current_rank');
+        },
+        'games' => function($query) {
+            $query->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court']);
+        }
+    ])->toArray();
+
+    // ✅ SI ES EL DUEÑO, INCLUIR CÓDIGOS DE MODERADOR
+    if ($isOwner) {
+        $sessionData['moderator_code'] = $session->moderator_code;
+        $sessionData['verification_code'] = $session->verification_code;
+    }
 
     return response()->json([
-        'session' => $session->load([
-            'courts',
-            'players' => function($query) {
-                $query->orderBy('current_rank');
-            },
-            'games' => function($query) {
-                $query->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court']);
-            }
-        ]),
-        'elapsed_seconds' => $elapsedSeconds  // 👈 Agregar esto
+        'session' => $sessionData,
+        'elapsed_seconds' => $elapsedSeconds,
+        'is_owner' => $isOwner // ← NUEVO
     ]);
 }
   /**
@@ -586,6 +939,12 @@ public function canAdvance(Session $session): JsonResponse
         }
     }
     
+      if ($session->isSimple()) {
+        return response()->json([
+            'can_advance' => false,
+            'message' => 'Simple mode has no stages or playoffs'
+        ]);
+    }
 
     // Verificar que la sesión pertenezca al usuario
     if ($session->user_id !== auth()->id()) {
@@ -988,6 +1347,13 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
                 'error' => 'Solo sesiones P4/P8/Tournament pueden avanzar etapas'
             ], 400);
         }
+           if ($session->isSimple()) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Simple mode does not have stages or playoffs'
+            ], 400);
+        }
+
 
         // ✅ NUEVO: Detectar P8 NORMAL que necesita generar Gold/Bronze
         if ($this->isNormalP8NeedingFinals($session)) {
@@ -1745,6 +2111,13 @@ private function canAdvanceStage(Session $session): bool
             ->where('stage', $session->current_stage)
             ->where('status', '!=', 'completed')
             ->count() === 0;
+    }
+
+     if ($session->isSimple()) {
+        return response()->json([
+            'can_advance' => false,
+            'message' => 'Simple mode has no stages or playoffs'
+        ]);
     }
     
     // Para playoffs: validar que todos los juegos regulares estén completos
