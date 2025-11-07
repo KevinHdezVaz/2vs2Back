@@ -76,6 +76,7 @@ class Kernel extends HttpKernel
         'mp.webhook' => \App\Http\Middleware\ValidateMercadoPagoWebhook::class,
 
         'check.trial' => CheckTrialStatus::class,
+    'simple.auth' => \App\Http\Middleware\SimpleAuth::class,
 
     ];
 }
