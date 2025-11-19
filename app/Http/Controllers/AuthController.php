@@ -43,7 +43,12 @@ class AuthController extends Controller
             'phone' => 'nullable|string|max:20|unique:users',
             'password' => 'required|string|min:6',
             'affiliate_code' => 'nullable|string|exists:affiliates,referral_code',
-        ]);
+        ]
+    , [
+        // Mensajes personalizados
+        'email.unique' => 'An account already exists with that email',
+        
+    ]);
 
         Log::info('Datos validados para registro:', $validated);
 
@@ -214,12 +219,104 @@ class AuthController extends Controller
             'id' => $user->id,
             'name' => $user->name,
             'email' => $user->email,
+             'phone' => $user->phone,
             'created_at' => $user->created_at->format('F j, Y'), // "January 15, 2024"
             'sessions_completed' => $completedSessions,
             'active_sessions' => $activeSessions,
         ]);
     }
     
+
+    public function updateProfile(Request $request): JsonResponse
+{
+    $user = $request->user();
+    
+    try {
+        // Validar los datos
+        $validated = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'email' => 'sometimes|required|string|email|max:255|unique:users,email,' . $user->id,
+            'phone' => 'nullable|string|max:20|unique:users,phone,' . $user->id,
+            'current_password' => 'required_with:new_password|string',
+            'new_password' => 'nullable|string|min:6|confirmed',
+        ], [
+            // Mensajes personalizados
+            'email.unique' => 'This email is already in use by another account',
+            'phone.unique' => 'This phone number is already in use by another account',
+            'new_password.confirmed' => 'Password confirmation does not match',
+            'new_password.min' => 'New password must be at least 6 characters',
+            'current_password.required_with' => 'Current password is required to change password',
+        ]);
+
+        Log::info('Actualizando perfil', [
+            'user_id' => $user->id,
+            'fields' => array_keys($validated)
+        ]);
+
+        // Si se está intentando cambiar la contraseña
+        if ($request->has('new_password')) {
+            // Verificar que la contraseña actual sea correcta
+            if (!Hash::check($request->current_password, $user->password)) {
+                return response()->json([
+                    'message' => 'Current password is incorrect'
+                ], 400);
+            }
+            
+            // Hashear la nueva contraseña
+            $validated['password'] = Hash::make($request->new_password);
+            
+            Log::info('Contraseña actualizada', ['user_id' => $user->id]);
+        }
+
+        // Remover campos que no se deben guardar directamente
+        unset($validated['current_password']);
+        unset($validated['new_password']);
+        unset($validated['new_password_confirmation']);
+
+        // Actualizar el usuario
+        $user->update($validated);
+
+        Log::info('Perfil actualizado exitosamente', [
+            'user_id' => $user->id,
+            'updated_fields' => array_keys($validated)
+        ]);
+
+        // Retornar el usuario actualizado
+        return response()->json([
+            'message' => 'Profile updated successfully',
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+            ]
+        ]);
+
+    } catch (\Illuminate\Validation\ValidationException $e) {
+        Log::warning('Error de validación al actualizar perfil', [
+            'user_id' => $user->id,
+            'errors' => $e->errors()
+        ]);
+        
+        return response()->json([
+            'message' => 'Validation error',
+            'errors' => $e->errors()
+        ], 422);
+        
+    } catch (\Exception $e) {
+        Log::error('Error al actualizar perfil', [
+            'user_id' => $user->id,
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        
+        return response()->json([
+            'message' => 'Error updating profile: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+
     // ✅ NUEVO: Eliminar cuenta del usuario
     public function deleteAccount(Request $request): JsonResponse
     {

@@ -49,15 +49,15 @@ class Player extends Model
     }
 
    
-    public function getInitialRatingByLevel(): float
-    {
-        return match($this->level) {
-            'Por encima del promedio' => 1200,
-            'Promedio' => 1000,
-            'Por debajo del promedio' => 800,
-            default => 1000
-        };
-    }
+  public function getInitialRatingByLevel(): float
+{
+    return match($this->level) {
+        'Above Average' => 1100,    // ✅ Inglés, +10%
+        'Average' => 1000,           // ✅ Inglés
+        'Below Average' => 900,      // ✅ Inglés, -10%
+        default => 1000
+    };
+}
 
     /**
      * Obtener todos los juegos del jugador

@@ -482,6 +482,9 @@ class GameGeneratorService
             ->get();
     }
 
+    /**
+     * ✅ CORREGIDO: Generar playoff bracket con soporte para Bronze match en P4
+     */
     public function generatePlayoffBracket(Session $session): Collection
     {
         $games = collect();
@@ -496,23 +499,46 @@ class GameGeneratorService
         if ($session->isPlayoff4()) {
             $topPlayers = $session->players()
                 ->orderBy('current_rank', 'asc')
-                ->limit(4)
+                ->limit(8) // Obtener top 8 por si hay Bronze match
                 ->get();
 
-            $team1 = collect([$topPlayers[0], $topPlayers[3]]);
-            $team2 = collect([$topPlayers[1], $topPlayers[2]]);
+            // ✅ GOLD MATCH (siempre se juega)
+            // S1P1 & S1P4 vs S1P2 & S1P3
+            $goldTeam1 = collect([$topPlayers[0], $topPlayers[3]]);
+            $goldTeam2 = collect([$topPlayers[1], $topPlayers[2]]);
 
-            $game = $this->createGame($session, $gameNumber, null, $team1, $team2);
-            $game->is_playoff_game = true;
-            $game->playoff_round = 'final';
-            $game->save();
+            $goldGame = $this->createGame($session, $gameNumber, null, $goldTeam1, $goldTeam2);
+            $goldGame->is_playoff_game = true;
+            $goldGame->playoff_round = 'gold';
+            $goldGame->save();
+            $games->push($goldGame);
+            $gameNumber++;
 
-            $games->push($game);
-            
-            Log::info('Playoff bracket P4 generado', [
-                'final_game' => $gameNumber,
-                'top_4' => $topPlayers->pluck('display_name')
-            ]);
+            // ✅ BRONZE MATCH (solo si hay 2+ canchas)
+            if ($session->number_of_courts >= 2 && $topPlayers->count() >= 8) {
+                // S1P5 & S1P8 vs S1P6 & S1P7
+                $bronzeTeam1 = collect([$topPlayers[4], $topPlayers[7]]);
+                $bronzeTeam2 = collect([$topPlayers[5], $topPlayers[6]]);
+
+                $bronzeGame = $this->createGame($session, $gameNumber, null, $bronzeTeam1, $bronzeTeam2);
+                $bronzeGame->is_playoff_game = true;
+                $bronzeGame->playoff_round = 'bronze';
+                $bronzeGame->save();
+                $games->push($bronzeGame);
+
+                Log::info('Playoff bracket P4 generado con Gold + Bronze', [
+                    'gold_game' => $gameNumber - 1,
+                    'bronze_game' => $gameNumber,
+                    'courts' => $session->number_of_courts,
+                    'top_8' => $topPlayers->pluck('display_name')
+                ]);
+            } else {
+                Log::info('Playoff bracket P4 generado (solo Gold)', [
+                    'gold_game' => $gameNumber - 1,
+                    'courts' => $session->number_of_courts,
+                    'top_4' => $topPlayers->take(4)->pluck('display_name')
+                ]);
+            }
         } 
         elseif ($session->isPlayoff8()) {
             $topPlayers = $session->players()
@@ -547,7 +573,6 @@ class GameGeneratorService
             ]);
         }
 
-    //    $this->assignCourtsToGames($session, $games);
         return $games;
     }
 
@@ -897,7 +922,7 @@ public function generateP4Final(Session $session, Collection $semifinals): Colle
             'stage' => $stage,
             'status' => 'pending',
             'team1_player1_id' => $team1[0]->id,
-            'team1_player2_id' => $team1[1]-> id,
+            'team1_player2_id' => $team1[1]->id,
             'team2_player1_id' => $team2[0]->id,
             'team2_player2_id' => $team2[1]->id,
         ]);

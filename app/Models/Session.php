@@ -266,64 +266,81 @@ class Session extends Model
     }
 
     private function calculateTotalExpectedGames(): int
-    {
-        if ($this->isSpecialP8()) {
-            $regularGames = $this->games()
-                ->where('is_playoff_game', false)
-                ->count();
-            
-            return $regularGames + 2;
-        }
+{
+    // ✅ P8 ESPECIAL (1C2H6P-P8, 1C2H7P-P8 futuros)
+    if ($this->isSpecialP8()) {
+        $regularGames = $this->games()
+            ->where('is_playoff_game', false)
+            ->count();
         
-        if ($this->isPlayoff8()) {
-            $regularGames = $this->games()
-                ->where('is_playoff_game', false)
-                ->count();
-            
-            return $regularGames + 4;
-        }
+        // Qualifier + Final = 2 juegos de playoff
+        return $regularGames + 2;
+    }
+    
+    // ✅ P8 NORMAL
+    if ($this->isPlayoff8()) {
+        $regularGames = $this->games()
+            ->where('is_playoff_game', false)
+            ->count();
         
-        if ($this->isPlayoff4()) {
-            $regularGames = $this->games()
-                ->where('is_playoff_game', false)
-                ->count();
-            
-            return $regularGames + 1;
-        }
+        // 2 Semifinals + Gold + Bronze = 4 juegos de playoff
+        return $regularGames + 4;
+    }
+    
+    // ✅ P4 - CORREGIDO: Verificar si tiene Bronze match (2+ canchas)
+    if ($this->isPlayoff4()) {
+        $regularGames = $this->games()
+            ->where('is_playoff_game', false)
+            ->count();
         
-        if ($this->isTournament()) {
-            $template = $this->loadTemplateForSession();
+        // ✅ VERIFICAR SI EXISTE BRONZE MATCH
+        $hasBronzeMatch = $this->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'bronze')
+            ->exists();
+        
+        // Gold (siempre) + Bronze (si hay 2+ canchas)
+        $playoffGames = $hasBronzeMatch ? 2 : 1;
+        
+        return $regularGames + $playoffGames;
+    }
+    
+    // ✅ TOURNAMENT
+    if ($this->isTournament()) {
+        $template = $this->loadTemplateForSession();
+        
+        if ($template && isset($template['blocks'])) {
+            $totalGames = 0;
             
-            if ($template && isset($template['blocks'])) {
-                $totalGames = 0;
-                
-                foreach ($template['blocks'] as $block) {
-                    foreach ($block['rounds'] as $round) {
-                        $totalGames += count($round['courts']);
-                    }
+            foreach ($template['blocks'] as $block) {
+                foreach ($block['rounds'] as $round) {
+                    $totalGames += count($round['courts']);
                 }
-                
-                Log::info('📊 Tournament total games from template', [
-                    'session_id' => $this->id,
-                    'template_name' => $this->getTemplateName(),
-                    'total_games_from_template' => $totalGames,
-                    'current_stage' => $this->current_stage,
-                    'blocks_count' => count($template['blocks'])
-                ]);
-                
-                return $totalGames;
             }
             
-            Log::warning('⚠️ Template not found for tournament - using current games count', [
+            Log::info('📊 Tournament total games from template', [
                 'session_id' => $this->id,
-                'template_name' => $this->getTemplateName()
+                'template_name' => $this->getTemplateName(),
+                'total_games_from_template' => $totalGames,
+                'current_stage' => $this->current_stage,
+                'blocks_count' => count($template['blocks'])
             ]);
             
-            return $this->games()->count();
+            return $totalGames;
         }
+        
+        Log::warning('⚠️ Template not found for tournament - using current games count', [
+            'session_id' => $this->id,
+            'template_name' => $this->getTemplateName()
+        ]);
         
         return $this->games()->count();
     }
+    
+    // ✅ SIMPLE / OPTIMIZED
+    return $this->games()->count();
+}
+
 
     private function loadTemplateForSession(): ?array
     {

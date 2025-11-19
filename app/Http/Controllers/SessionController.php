@@ -1187,30 +1187,36 @@ private function getP8PodiumData(Session $session): array
     ];
 }
 
+ 
 /**
- * Podio para P4 (sin Bronze Match)
+ * ✅ NUEVO MÉTODO: Podio para P4 (con o sin Bronze Match)
+ * 
+ * - 1 cancha: Solo Gold (S1P1+S1P4 vs S1P2+S1P3)
+ * - 2+ canchas: Gold + Bronze (S1P5+S1P8 vs S1P6+S1P7)
  */
 private function getP4PodiumData(Session $session): array
 {
-    $finalGame = $session->games()
+    // ✅ Buscar Gold match
+    $goldGame = $session->games()
         ->where('is_playoff_game', true)
-        ->where('playoff_round', 'final')
+        ->where('playoff_round', 'gold')
         ->where('status', 'completed')
         ->first();
 
-    if (!$finalGame) {
+    if (!$goldGame) {
         return ['type' => 'incomplete'];
     }
 
-    $champions = $finalGame->winner_team === 1
-        ? [$finalGame->team1Player1, $finalGame->team1Player2]
-        : [$finalGame->team2Player1, $finalGame->team2Player2];
+    // ✅ Obtener campeones y subcampeones del Gold match
+    $champions = $goldGame->winner_team === 1
+        ? [$goldGame->team1Player1, $goldGame->team1Player2]
+        : [$goldGame->team2Player1, $goldGame->team2Player2];
 
-    $runnersUp = $finalGame->winner_team === 1
-        ? [$finalGame->team2Player1, $finalGame->team2Player2]
-        : [$finalGame->team1Player1, $finalGame->team1Player2];
+    $runnersUp = $goldGame->winner_team === 1
+        ? [$goldGame->team2Player1, $goldGame->team2Player2]
+        : [$goldGame->team1Player1, $goldGame->team1Player2];
 
-    return [
+    $podium = [
         'type' => 'P4',
         'champions' => [
             'players' => array_map(fn($p) => [
@@ -1227,7 +1233,32 @@ private function getP4PodiumData(Session $session): array
             ], $runnersUp)
         ]
     ];
+
+    // ✅ Buscar Bronze match (si existe)
+    $bronzeGame = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'bronze')
+        ->where('status', 'completed')
+        ->first();
+
+    // ✅ Si hay Bronze match, agregar tercer lugar
+    if ($bronzeGame) {
+        $thirdPlace = $bronzeGame->winner_team === 1
+            ? [$bronzeGame->team1Player1, $bronzeGame->team1Player2]
+            : [$bronzeGame->team2Player1, $bronzeGame->team2Player2];
+
+        $podium['third_place'] = [
+            'players' => array_map(fn($p) => [
+                'id' => $p->id,
+                'display_name' => $p->display_name,
+                'rating' => round($p->current_rating, 0)
+            ], $thirdPlace)
+        ];
+    }
+
+    return $podium;
 }
+
 
 /**
  * Podio para Optimized (top 3 individuales)

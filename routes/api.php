@@ -99,6 +99,8 @@ Route::middleware(['auth:sanctum', 'throttle:300,1'])->group(function () {
     // USUARIO Y PERFIL
     // ========================================
     Route::get('/user/profile', [AuthController::class, 'getProfile']);
+     Route::put('/user/profile', [AuthController::class, 'updateProfile']); // ← NUEVA
+
     Route::delete('/user/account', [AuthController::class, 'deleteAccount']);
     Route::get('/user/name', [AuthController::class, 'getUserName']);
     Route::post('/user/update-onesignal-id', function (Request $request) {
