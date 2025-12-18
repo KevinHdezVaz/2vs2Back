@@ -24,7 +24,7 @@ class AuthController extends Controller
     {
         // Configuración de Firebase
         $serviceAccountPath = storage_path('app/firebase/vs2-962e9-firebase-adminsdk-fbsvc-45655cd0c8.json');
-        
+
         if (!file_exists($serviceAccountPath)) {
             throw new \RuntimeException("Archivo de configuración de Firebase no encontrado");
         }
@@ -47,7 +47,7 @@ class AuthController extends Controller
     , [
         // Mensajes personalizados
         'email.unique' => 'An account already exists with that email',
-        
+
     ]);
 
         Log::info('Datos validados para registro:', $validated);
@@ -59,7 +59,7 @@ class AuthController extends Controller
         // 3. Añadir datos del período de prueba
         $validated['trial_ends_at'] = Carbon::now()->addDays(5);
         $validated['subscription_status'] = 'trial';
-        
+
         // 4. Guardar el código de afiliado que se usó (si existe)
         if ($request->has('affiliate_code')) {
             $validated['applied_affiliate_code'] = $request->affiliate_code;
@@ -97,9 +97,9 @@ class AuthController extends Controller
 
         // Verificar que el usuario exista y la contraseña sea correcta.
         if (!$user || !Hash::check($validated['password'], $user->password)) {
-            return response()->json(['message' => 'Credenciales inválidas'], 401);
+            return response()->json(['message' => 'Invalid credentials'], 401);
         }
-    
+
         return response()->json([
             'user' => $user,
             'token' => $user->createToken('auth_token')->plainTextToken
@@ -112,26 +112,26 @@ class AuthController extends Controller
             $validator = Validator::make($request->all(), [
                 'id_token' => 'required|string',
             ]);
-    
+
             if ($validator->fails()) {
                 return response()->json([
                     'success' => false,
                     'errors' => $validator->errors()
                 ], 422);
             }
-    
+
             $idToken = $request->input('id_token');
-            
+
             \Log::info("Token recibido: " . substr($idToken, 0, 30) . "...");
-    
+
             try {
                 $verifiedIdToken = $this->firebaseAuth->verifyIdToken($idToken, true);
                 $claims = $verifiedIdToken->claims();
-                
+
                 $firebaseUid = $claims->get('sub');
                 $email = $claims->get('email');
                 $name = $claims->get('name') ?? 'Usuario Google';
-                
+
                 $user = User::firstOrCreate(
                     ['email' => $email],
                     [
@@ -144,29 +144,29 @@ class AuthController extends Controller
                         'phone' => null,
                     ]
                 );
-    
+
                 $token = $user->createToken('auth_token')->plainTextToken;
-    
+
                 return response()->json([
                     'success' => true,
                     'user' => $user,
                     'token' => $token,
                 ]);
-    
+
             } catch (\Throwable $e) {
                 \Log::error("Error al verificar token:", [
                     'error' => $e->getMessage(),
                     'trace' => $e->getTraceAsString(),
                     'token_sample' => substr($idToken, 0, 50)
                 ]);
-                
+
                 return response()->json([
                     'success' => false,
                     'message' => 'Error en verificación de token',
                     'error' => $e->getMessage(),
                 ], 401);
             }
-    
+
         } catch (\Exception $e) {
             \Log::error("Error general en googleLogin: " . $e->getMessage());
             return response()->json([
@@ -187,14 +187,14 @@ class AuthController extends Controller
     public function logout(Request $request)
     {
         $request->user()->tokens()->delete();
-        
+
         return response()->json(['message' => 'Cierre de sesión exitoso']);
     }
 
     public function profile(Request $request)
     {
         $user = $request->user();
-        
+
         return response()->json([
             'user' => $user,
         ]);
@@ -204,17 +204,17 @@ class AuthController extends Controller
     public function getProfile(Request $request): JsonResponse
     {
         $user = $request->user();
-        
+
         // Contar sesiones completadas
         $completedSessions = \App\Models\Session::where('user_id', $user->id)
             ->where('status', 'completed')
             ->count();
-        
+
         // Contar sesiones activas
         $activeSessions = \App\Models\Session::where('user_id', $user->id)
             ->where('status', 'active')
             ->count();
-        
+
         return response()->json([
             'id' => $user->id,
             'name' => $user->name,
@@ -225,12 +225,12 @@ class AuthController extends Controller
             'active_sessions' => $activeSessions,
         ]);
     }
-    
+
 
     public function updateProfile(Request $request): JsonResponse
 {
     $user = $request->user();
-    
+
     try {
         // Validar los datos
         $validated = $request->validate([
@@ -261,10 +261,10 @@ class AuthController extends Controller
                     'message' => 'Current password is incorrect'
                 ], 400);
             }
-            
+
             // Hashear la nueva contraseña
             $validated['password'] = Hash::make($request->new_password);
-            
+
             Log::info('Contraseña actualizada', ['user_id' => $user->id]);
         }
 
@@ -275,6 +275,7 @@ class AuthController extends Controller
 
         // Actualizar el usuario
         $user->update($validated);
+        $user->refresh();
 
         Log::info('Perfil actualizado exitosamente', [
             'user_id' => $user->id,
@@ -297,19 +298,19 @@ class AuthController extends Controller
             'user_id' => $user->id,
             'errors' => $e->errors()
         ]);
-        
+
         return response()->json([
             'message' => 'Validation error',
             'errors' => $e->errors()
         ], 422);
-        
+
     } catch (\Exception $e) {
         Log::error('Error al actualizar perfil', [
             'user_id' => $user->id,
             'error' => $e->getMessage(),
             'trace' => $e->getTraceAsString()
         ]);
-        
+
         return response()->json([
             'message' => 'Error updating profile: ' . $e->getMessage()
         ], 500);
@@ -321,31 +322,31 @@ class AuthController extends Controller
     public function deleteAccount(Request $request): JsonResponse
     {
         $user = $request->user();
-        
+
         try {
             Log::info('Iniciando eliminación de cuenta', [
                 'user_id' => $user->id,
                 'email' => $user->email
             ]);
-            
+
             // Eliminar todas las sesiones del usuario (cascade eliminará todo lo relacionado)
             $deletedSessions = \App\Models\Session::where('user_id', $user->id)->delete();
-            
+
             Log::info('Sesiones eliminadas', [
                 'user_id' => $user->id,
                 'deleted_sessions' => $deletedSessions
             ]);
-            
+
             // Eliminar tokens de autenticación
             $user->tokens()->delete();
-            
+
             // Eliminar el usuario
             $user->delete();
-            
+
             Log::info('Cuenta eliminada exitosamente', [
                 'user_id' => $user->id
             ]);
-            
+
             return response()->json([
                 'message' => 'Account deleted successfully'
             ]);
@@ -355,7 +356,7 @@ class AuthController extends Controller
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-            
+
             return response()->json([
                 'message' => 'Error deleting account: ' . $e->getMessage()
             ], 500);

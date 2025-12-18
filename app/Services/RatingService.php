@@ -4,6 +4,9 @@ namespace App\Services;
 
 use App\Models\Game;
 use App\Models\Player;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
 
 class RatingService
 {
@@ -16,46 +19,76 @@ class RatingService
     /**
      * Actualizar ratings después de un juego completado
      */
+   
     public function updateRatings(Game $game): void
-    {
-        // Obtener jugadores
-        $team1Players = [$game->team1Player1, $game->team1Player2];
-        $team2Players = [$game->team2Player1, $game->team2Player2];
+{
+    // Obtener jugadores
+    $team1Players = [$game->team1Player1, $game->team1Player2];
+    $team2Players = [$game->team2Player1, $game->team2Player2];
 
-        // Calcular rating promedio de cada equipo
-        $team1AvgRating = ($team1Players[0]->current_rating + $team1Players[1]->current_rating) / 2;
-        $team2AvgRating = ($team2Players[0]->current_rating + $team2Players[1]->current_rating) / 2;
+    // Calcular rating promedio de cada equipo
+    $team1AvgRating = ($team1Players[0]->current_rating + $team1Players[1]->current_rating) / 2;
+    $team2AvgRating = ($team2Players[0]->current_rating + $team2Players[1]->current_rating) / 2;
 
-        // Calcular probabilidades esperadas
-        $team1ExpectedScore = $this->calculateExpectedScore($team1AvgRating, $team2AvgRating);
-        $team2ExpectedScore = 1 - $team1ExpectedScore;
+    // Calcular probabilidades esperadas
+    $team1ExpectedScore = $this->calculateExpectedScore($team1AvgRating, $team2AvgRating);
+    $team2ExpectedScore = 1 - $team1ExpectedScore;
 
-        // Resultado real (1 si ganó, 0 si perdió)
-        $team1ActualScore = $game->winner_team === 1 ? 1 : 0;
-        $team2ActualScore = $game->winner_team === 2 ? 1 : 0;
+    // Resultado real
+    $team1ActualScore = $game->winner_team === 1 ? 1 : 0;
+    $team2ActualScore = $game->winner_team === 2 ? 1 : 0;
 
-        // ✅ NUEVO: Calcular scores ajustados para Best of 3
-        $adjustedScores = $this->getAdjustedScoresForRating($game);
+    // Scores ajustados para Best of 3
+    $adjustedScores = $this->getAdjustedScoresForRating($game);
 
-        // Calcular multiplicador basado en margen de puntos (usando scores ajustados)
-        $scoreMargin = abs($adjustedScores['team1'] - $adjustedScores['team2']);
-        $marginMultiplier = $this->calculateMarginMultiplier($scoreMargin, $game->session->points_per_game);
+    // Calcular multiplicador basado en margen
+    $scoreMargin = abs($adjustedScores['team1'] - $adjustedScores['team2']);
+    $marginMultiplier = $this->calculateMarginMultiplier(
+        $scoreMargin, 
+        $game->session->points_per_game
+    );
 
-        // Calcular cambio de rating base
-        $team1RatingChange = self::K_FACTOR * ($team1ActualScore - $team1ExpectedScore) * $marginMultiplier;
-        $team2RatingChange = self::K_FACTOR * ($team2ActualScore - $team2ExpectedScore) * $marginMultiplier;
+    // Calcular cambios de rating
+    $team1RatingChange = self::K_FACTOR * ($team1ActualScore - $team1ExpectedScore) * $marginMultiplier;
+    $team2RatingChange = self::K_FACTOR * ($team2ActualScore - $team2ExpectedScore) * $marginMultiplier;
 
-        // Aplicar cambios a cada jugador del equipo
-        foreach ($team1Players as $player) {
-            $player->current_rating += $team1RatingChange;
-            $player->save();
-        }
-
-        foreach ($team2Players as $player) {
-            $player->current_rating += $team2RatingChange;
-            $player->save();
-        }
+    // ✅ NUEVO: Preparar bulk update
+    $updates = [];
+    
+    foreach ($team1Players as $player) {
+        $updates[$player->id] = $player->current_rating + $team1RatingChange;
     }
+    
+    foreach ($team2Players as $player) {
+        $updates[$player->id] = $player->current_rating + $team2RatingChange;
+    }
+    
+    // ✅ 1 solo UPDATE para los 4 jugadores
+    if (!empty($updates)) {
+        $cases = [];
+        $ids = [];
+        
+        foreach ($updates as $id => $rating) {
+            $cases[] = "WHEN {$id} THEN {$rating}";
+            $ids[] = $id;
+        }
+        
+        $casesSql = implode(' ', $cases);
+        $idsSql = implode(',', $ids);
+        
+        \DB::update("
+            UPDATE players 
+            SET current_rating = CASE id {$casesSql} END,
+                updated_at = NOW()
+            WHERE id IN ({$idsSql})
+        ");
+        
+        Log::info('✅ Ratings updated (bulk)', [
+            'game_id' => $game->id,
+            'players_updated' => count($ids)
+        ]);
+    }
+}
 
     /**
      * ✅ NUEVO: Obtener scores ajustados para el cálculo de rating

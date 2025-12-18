@@ -26,7 +26,7 @@ class SessionController extends Controller
     public function store(Request $request): JsonResponse
     {
         \Log::info('Request data received:', $request->all());
-        
+
         try {
             $validated = $request->validate([
                 'session_name' => 'required|string|max:255',
@@ -51,13 +51,13 @@ class SessionController extends Controller
                 'errors' => $e->errors(),
                 'message' => $e->getMessage()
             ]);
-            
+
             return response()->json([
                 'message' => 'Validation error',
                 'errors' => $e->errors()
             ], 422);
         }
-        
+
         \Log::info('Data validated:', $validated);
 
         // Validar configuración del template
@@ -69,7 +69,7 @@ class SessionController extends Controller
         ]);
 
         $validation = $this->gameGenerator->validateSessionConfiguration($tempSession);
-        
+
         if (!$validation['valid']) {
             \Log::warning('Configuration validation failed:', ['message' => $validation['message']]);
             return response()->json([
@@ -80,8 +80,8 @@ class SessionController extends Controller
         // Validar cantidad de jugadores
         $minPlayers = $validated['number_of_courts'] * 4;
         $maxPlayers = $validated['number_of_courts'] * 8;
-        
-        if ($validated['number_of_players'] < $minPlayers || 
+
+        if ($validated['number_of_players'] < $minPlayers ||
             $validated['number_of_players'] > $maxPlayers) {
             return response()->json([
                 'message' => "Number of players must be between {$minPlayers} and {$maxPlayers}"
@@ -158,31 +158,31 @@ class SessionController extends Controller
 
         try {
             $games = collect();
-            
+
             if ($session->isPlayoff4() || $session->isPlayoff8()) {
                 $games = $this->gameGenerator->generateAllGames($session);
-                
+
                 Log::info('Regular phase games generated', [
                     'session_id' => $session->id,
                     'session_type' => $session->session_type,
                     'games_count' => $games->count()
                 ]);
-                
+
             } elseif ($session->isTournament()) {
                 $session->current_stage = 1;
                 $session->save();
-                
+
                 $games = $this->gameGenerator->generateStageGames($session);
-                
+
                 Log::info('Stage 1 games generated', [
                     'session_id' => $session->id,
                     'current_stage' => $session->current_stage,
                     'games_count' => $games->count()
                 ]);
-                
+
             } else {
                 $games = $this->gameGenerator->generateAllGames($session);
-                
+
                 Log::info('Optimized games generated', [
                     'session_id' => $session->id,
                     'games_count' => $games->count()
@@ -195,17 +195,17 @@ class SessionController extends Controller
 
             // Asignar canchas a los primeros N juegos
             $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
-            
+
             Log::info('Assigning courts to initial games', [
                 'available_courts' => $courts->count(),
                 'games_to_assign' => min($courts->count(), $games->count())
             ]);
-            
+
             foreach ($games->take($courts->count()) as $index => $game) {
                 if (isset($courts[$index])) {
                     $game->court_id = $courts[$index]->id;
                     $game->save();
-                    
+
                     Log::info('Court assigned to game', [
                         'game_id' => $game->id,
                         'game_number' => $game->game_number,
@@ -237,12 +237,12 @@ class SessionController extends Controller
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-            
+
             // Rollback
             $session->courts()->delete();
             $session->players()->delete();
             $session->delete();
-            
+
             return response()->json([
                 'message' => 'Error generating games: ' . $e->getMessage()
             ], 500);
@@ -281,7 +281,7 @@ class SessionController extends Controller
 
         try {
             $games = collect();
-            
+
             // Generar juegos según tipo de sesión
             if ($session->isPlayoff4() || $session->isPlayoff8()) {
                 $games = $this->gameGenerator->generateAllGames($session);
@@ -299,7 +299,7 @@ class SessionController extends Controller
 
             // Asignar canchas
             $courts = $session->courts()->where('status', 'available')->orderBy('court_number', 'asc')->get();
-            
+
             foreach ($games->take($courts->count()) as $index => $game) {
                 if (isset($courts[$index])) {
                     $game->court_id = $courts[$index]->id;
@@ -326,7 +326,7 @@ class SessionController extends Controller
                 'session_id' => $session->id,
                 'error' => $e->getMessage()
             ]);
-            
+
             return response()->json([
                 'message' => 'Error activating session: ' . $e->getMessage()
             ], 500);
@@ -361,7 +361,7 @@ class SessionController extends Controller
         'user_id' => $request->user()->id ?? 'guest'
     ]);
 
-    $elapsedSeconds = $session->started_at 
+    $elapsedSeconds = $session->started_at
     ? ($session->status === 'completed' && $session->completed_at
         ? $session->started_at->diffInSeconds($session->completed_at)
         : now()->diffInSeconds($session->started_at))
@@ -387,53 +387,53 @@ class SessionController extends Controller
  * Este método permite a cualquiera con el Session Code (espectador) + Verification Code
  * obtener acceso de moderador
  */
-public function moderatorLoginWithSessionCode(Request $request): JsonResponse
-{
-    $validated = $request->validate([
-        'session_code' => 'required|string|size:6',
-        'verification_code' => 'required|string|size:2'
-    ]);
+    public function moderatorLoginWithSessionCode(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'session_code' => 'required|string|size:6',
+            'verification_code' => 'required|string|size:2'
+        ]);
 
-    // ✅ BUSCAR POR SESSION_CODE (el código público de espectador)
-    $session = Session::where('session_code', strtoupper($validated['session_code']))
-        ->where('verification_code', $validated['verification_code'])
-        ->whereIn('status', ['active', 'pending'])
-        ->first();
+        // ✅ BUSCAR POR SESSION_CODE (el código público de espectador)
+        $session = Session::where('session_code', strtoupper($validated['session_code']))
+            ->where('verification_code', $validated['verification_code'])
+            ->whereIn('status', ['active', 'pending'])
+            ->first();
 
-    if (!$session) {
+        if (!$session) {
+            return response()->json([
+                'message' => 'Invalid session code or verification code'
+            ], 404);
+        }
+
+        Log::info('Moderator logged in with session code + verification', [
+            'session_id' => $session->id,
+            'session_code' => $session->session_code,
+            'verification_code' => $session->verification_code,
+            'user_id' => $request->user()->id ?? 'guest'
+        ]);
+
+        // ✅ Calcular elapsed_seconds correctamente
+        $elapsedSeconds = $session->started_at
+            ? ($session->status === 'completed' && $session->completed_at
+                ? $session->started_at->diffInSeconds($session->completed_at)
+                : now()->diffInSeconds($session->started_at))
+            : 0;
+
         return response()->json([
-            'message' => 'Invalid session code or verification code'
-        ], 404);
+            'message' => 'Moderator access granted',
+            'session' => $session->load([
+                'user',  // ✅ AGREGAR ESTA LÍNEA
+                'courts',
+                'players' => function($query) {
+                    $query->orderBy('current_rank');
+                }
+            ]),
+            'elapsed_seconds' => $elapsedSeconds,
+            'is_moderator' => true,
+            'is_owner' => $session->user_id === ($request->user()->id ?? null)
+        ]);
     }
-
-    Log::info('Moderator logged in with session code + verification', [
-        'session_id' => $session->id,
-        'session_code' => $session->session_code,
-        'verification_code' => $session->verification_code,
-        'user_id' => $request->user()->id ?? 'guest'
-    ]);
-
-    // ✅ Calcular elapsed_seconds correctamente
-    $elapsedSeconds = $session->started_at 
-        ? ($session->status === 'completed' && $session->completed_at
-            ? $session->started_at->diffInSeconds($session->completed_at)
-            : now()->diffInSeconds($session->started_at))
-        : 0;
-
-    return response()->json([
-        'message' => 'Moderator access granted',
-        'session' => $session->load([
-            'courts',
-            'players' => function($query) {
-                $query->orderBy('current_rank');
-            }
-        ]),
-        'elapsed_seconds' => $elapsedSeconds,
-        'is_moderator' => true,
-        'is_owner' => $session->user_id === ($request->user()->id ?? null)
-    ]);
-}
-
 /**
  * ✅ NUEVO: Login de moderador con verificación de 2 códigos
  */
@@ -463,7 +463,7 @@ public function moderatorLoginWithVerification(Request $request): JsonResponse
         'user_id' => $request->user()->id ?? 'guest'
     ]);
 
-    $elapsedSeconds = $session->started_at 
+    $elapsedSeconds = $session->started_at
     ? ($session->status === 'completed' && $session->completed_at
         ? $session->started_at->diffInSeconds($session->completed_at)
         : now()->diffInSeconds($session->started_at))
@@ -569,7 +569,7 @@ public function moderatorLoginWithVerification(Request $request): JsonResponse
             'message' => 'Draft deleted successfully'
         ]);
     }
- 
+
 
 // app/Http/Controllers/SessionController.php
 
@@ -581,14 +581,14 @@ public function findByCode(string $code): JsonResponse
     $session = Session::where('session_code', strtoupper($code))
         ->where('status', 'active')
         ->first();
-    
+
     if (!$session) {
         return response()->json([
             'message' => 'Session not found or not active'
         ], 404);
     }
-    
-    $elapsedSeconds = $session->started_at 
+
+    $elapsedSeconds = $session->started_at
     ? ($session->status === 'completed' && $session->completed_at
         ? $session->started_at->diffInSeconds($session->completed_at)
         : now()->diffInSeconds($session->started_at))
@@ -618,13 +618,13 @@ public function getHistory(Request $request): JsonResponse
         ->map(function($session) {
             // Obtener el ganador (jugador con rank 1)
             $winner = $session->players->where('current_rank', 1)->first();
-            
+
             // Calcular duración en minutos
             $durationMinutes = null;
             if ($session->started_at && $session->completed_at) {
                 $durationMinutes = $session->started_at->diffInMinutes($session->completed_at);
             }
-            
+
             return [
                 'id' => $session->id,
                 'session_name' => $session->session_name,
@@ -765,7 +765,7 @@ public function getPublicActiveSessions(): JsonResponse
  */
 public function getPublicSession(Session $session): JsonResponse
 {
-    $elapsedSeconds = $session->started_at 
+    $elapsedSeconds = $session->started_at
     ? ($session->status === 'completed' && $session->completed_at
         ? $session->started_at->diffInSeconds($session->completed_at)
         : now()->diffInSeconds($session->started_at))
@@ -807,7 +807,7 @@ public function getPublicPlayerStats(Session $session): JsonResponse
     return response()->json(['players' => $players]);
 }
 
-    /** 
+    /**
      * Obtener detalles de sesión
      */
   // app/Http/Controllers/SessionController.php
@@ -817,7 +817,7 @@ public function show(Session $session): JsonResponse
     // ✅ VERIFICAR SI EL USUARIO ES EL DUEÑO
     $isOwner = $session->user_id === auth()->id();
 
-    $elapsedSeconds = $session->started_at 
+    $elapsedSeconds = $session->started_at
     ? ($session->status === 'completed' && $session->completed_at
         ? $session->started_at->diffInSeconds($session->completed_at)
         : now()->diffInSeconds($session->started_at))
@@ -849,7 +849,7 @@ public function show(Session $session): JsonResponse
   /**
  * Iniciar sesión (generar juegos iniciales)
  */
- 
+
 
 public function start(Game $game): JsonResponse
 {
@@ -930,7 +930,7 @@ public function canAdvance(Session $session): JsonResponse
         $hasPlayoffGames = $session->games()
             ->where('is_playoff_game', true)
             ->exists();
-            
+
         if ($hasPlayoffGames) {
             return response()->json([
                 'can_advance' => false,
@@ -938,7 +938,7 @@ public function canAdvance(Session $session): JsonResponse
             ]);
         }
     }
-    
+
       if ($session->isSimple()) {
         return response()->json([
             'can_advance' => false,
@@ -952,7 +952,7 @@ public function canAdvance(Session $session): JsonResponse
     }
 
     $canAdvance = $session->canAdvanceStage();
-    
+
     $pendingGames = $session->games()
         ->where('status', '!=', 'completed')
         ->count();
@@ -969,8 +969,8 @@ public function canAdvance(Session $session): JsonResponse
         'total_pending_games' => $pendingGames,
         'current_stage_pending_games' => $currentStageGames,
         'has_playoff_games' => $session->games()->where('is_playoff_game', true)->exists(),
-        'message' => $canAdvance 
-            ? 'Ready to advance to next stage' 
+        'message' => $canAdvance
+            ? 'Ready to advance to next stage'
             : "Cannot advance - {$currentStageGames} games pending in current stage"
     ]);
 }
@@ -991,7 +991,7 @@ public function advanceStage(Session $session): JsonResponse
         $pendingGames = $session->games()
             ->where('status', '!=', 'completed')
             ->count();
-            
+
         return response()->json([
             'message' => "Cannot advance. There are {$pendingGames} pending games."
         ], 422);
@@ -1018,7 +1018,7 @@ public function advanceStage(Session $session): JsonResponse
     $pendingCount = $session->games()->where('status', 'pending')->count();
     if ($pendingCount > 0) {
         $deletedCount = $session->games()->where('status', 'pending')->delete();
-        
+
         Log::info('Pending games DELETED when advancing tournament stage', [
             'session_id' => $session->id,
             'from_stage' => $oldStage,
@@ -1032,7 +1032,7 @@ public function advanceStage(Session $session): JsonResponse
 
     // Actualizar rankings
     $session->updateRankings();
-  
+
     Log::info('Tournament stage advanced', [
         'session_id' => $session->id,
         'from_stage' => $oldStage,
@@ -1075,11 +1075,11 @@ public function finalizeSession(Session $session): JsonResponse
 
     // ✅ PASO 1: CANCELAR todos los juegos pendientes y activos
     $pendingGames = $session->games()->whereIn('status', ['pending', 'active'])->get();
-    
+
     foreach ($pendingGames as $game) {
         $game->status = 'cancelled';
         $game->save();
-        
+
         Log::info('Juego cancelado durante finalización', [
             'game_id' => $game->id,
             'game_number' => $game->game_number,
@@ -1187,10 +1187,10 @@ private function getP8PodiumData(Session $session): array
     ];
 }
 
- 
+
 /**
  * ✅ NUEVO MÉTODO: Podio para P4 (con o sin Bronze Match)
- * 
+ *
  * - 1 cancha: Solo Gold (S1P1+S1P4 vs S1P2+S1P3)
  * - 2+ canchas: Gold + Bronze (S1P5+S1P8 vs S1P6+S1P7)
  */
@@ -1303,7 +1303,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
     // ✅ P8 NORMAL: Verificar si necesita Gold/Bronze
     if ($this->isNormalP8NeedingFinals($session)) {
         Log::info('✅ Auto-generando Gold/Bronze para P8 normal');
-        
+
         $semifinals = $session->games()
             ->where('is_playoff_game', true)
             ->where('playoff_round', 'semifinal')
@@ -1311,7 +1311,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             ->get();
 
         $newGames = $this->gameGenerator->generateP8Finals($session, $semifinals);
-        
+
         $session->updateProgress();
 
         return response()->json([
@@ -1325,7 +1325,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
     // ✅ P4: Verificar si necesita Final
     if ($this->isP4NeedingFinal($session)) {
         Log::info('✅ Auto-generando Final para P4');
-        
+
         $semifinals = $session->games()
             ->where('is_playoff_game', true)
             ->where('playoff_round', 'semifinal')
@@ -1333,7 +1333,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             ->get();
 
         $newGames = $this->gameGenerator->generateP4Final($session, $semifinals);
-        
+
         $session->updateProgress();
 
         return response()->json([
@@ -1347,9 +1347,9 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
     // ✅ P8 ESPECIAL: Verificar si necesita Final
     if ($this->isSpecialP8NeedingFinal($session)) {
         Log::info('✅ Auto-generando Final para P8 especial');
-        
+
         $newGames = $this->gameGenerator->generateSpecialP8Final($session);
-        
+
         $session->updateProgress();
 
         return response()->json([
@@ -1389,15 +1389,15 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
         // ✅ NUEVO: Detectar P8 NORMAL que necesita generar Gold/Bronze
         if ($this->isNormalP8NeedingFinals($session)) {
             Log::info('🆕 Detectado P8 normal - generando GOLD/BRONZE desde semifinals');
-            
+
             $semifinals = $session->games()
                 ->where('is_playoff_game', true)
                 ->where('playoff_round', 'semifinal')
                 ->where('status', 'completed')
                 ->get();
-            
+
             $newGames = $this->gameGenerator->generateP8Finals($session, $semifinals);
-            
+
             if ($newGames->isEmpty()) {
                 return response()->json([
                     'success' => false,
@@ -1423,15 +1423,15 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
         // ✅ NUEVO: Detectar P4 que necesita generar Final
         if ($this->isP4NeedingFinal($session)) {
             Log::info('🆕 Detectado P4 - generando FINAL desde semifinals');
-            
+
             $semifinals = $session->games()
                 ->where('is_playoff_game', true)
                 ->where('playoff_round', 'semifinal')
                 ->where('status', 'completed')
                 ->get();
-            
+
             $newGames = $this->gameGenerator->generateP4Final($session, $semifinals);
-            
+
             if ($newGames->isEmpty()) {
                 return response()->json([
                     'success' => false,
@@ -1458,7 +1458,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
         if ($this->isSpecialP8NeedingFinal($session)) {
             Log::info('🆕 Detectado P8 especial - generando FINAL');
             $newGames = $this->gameGenerator->generateSpecialP8Final($session);
-            
+
             if ($newGames->isEmpty()) {
                 return response()->json([
                     'success' => false,
@@ -1486,7 +1486,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             Log::info('⛔ P8 especial ya completo - no se puede avanzar más', [
                 'session_id' => $session->id
             ]);
-            
+
             return response()->json([
                 'success' => false,
                 'error' => 'All playoff games have already been generated. Session is complete!'
@@ -1802,7 +1802,7 @@ private function isP4NeedingFinal(Session $session): bool
     return $shouldGenerate;
 }
 
- 
+
 /**
  * ✅ NUEVO MÉTODO: Detectar si es P8 especial que necesita generar la Final
  */
@@ -1888,7 +1888,7 @@ private function isSpecialP8Complete(Session $session): bool
     // Si ya tiene Final, está completo
     return $hasFinal;
 }
- 
+
 /**
  * Generar finals de P8 manualmente
  */
@@ -1941,7 +1941,7 @@ private function isSpecialP8Complete(Session $session): bool
         $pendingCount = $session->games()->where('status', 'pending')->count();
         if ($pendingCount > 0) {
             $deletedCount = $session->games()->where('status', 'pending')->delete();
-            
+
             Log::info('Pending games deleted before generating P8 finals', [
                 'session_id' => $session->id,
                 'deleted_count' => $deletedCount
@@ -1972,20 +1972,20 @@ private function isSpecialP8Complete(Session $session): bool
 
 public function generateNextStageGames(Session $session): Collection
 {
- 
+
 
     $template = $this->loadTemplate($session);
-    
+
     // ✅ Determinar siguiente bloque BASADO EN LO QUE YA SE GENERÓ
     $nextBlockIndex = $this->getNextBlockIndex($session, $template);
-    
+
     if ($nextBlockIndex === null) {
         Log::info('No hay más bloques para generar', [
             'session_id' => $session->id
         ]);
         return collect();
     }
-    
+
     // ✅ Marcar este bloque como generado
     $this->markBlockAsGenerated($session, $nextBlockIndex);
 
@@ -2000,7 +2000,7 @@ public function generateNextStageGames(Session $session): Collection
 
     $players = $session->players->keyBy('id')->values();
     $games = collect();
-    
+
     // Obtener último game_number
     $lastGame = $session->games()->orderBy('game_number', 'desc')->first();
     $gameNumber = $lastGame ? $lastGame->game_number + 1 : 1;
@@ -2018,7 +2018,7 @@ public function generateNextStageGames(Session $session): Collection
     // ✅ Generar el BLOQUE CORRESPONDIENTE
     if (isset($template['blocks'][$currentBlockIndex])) {
         $block = $template['blocks'][$currentBlockIndex];
-        
+
         foreach ($block['rounds'] as $round) {
             foreach ($round['courts'] as $courtData) {
                 $teamA = $courtData['A'];
@@ -2054,7 +2054,7 @@ public function generateNextStageGames(Session $session): Collection
 
                 $games->push($game);
                 $gameNumber++;
-                
+
                 Log::info('Juego de playoff generado', [
                     'game_number' => $gameNumber - 1,
                     'playoff_round' => $game->playoff_round,
@@ -2066,7 +2066,7 @@ public function generateNextStageGames(Session $session): Collection
     }
 
     $this->assignCourtsToGames($session, $games);
-    
+
     Log::info('Siguiente etapa generada exitosamente', [
         'session_id' => $session->id,
         'games_created' => $games->count(),
@@ -2150,7 +2150,7 @@ private function canAdvanceStage(Session $session): bool
             'message' => 'Simple mode has no stages or playoffs'
         ]);
     }
-    
+
     // Para playoffs: validar que todos los juegos regulares estén completos
     if ($session->isPlayoff4() || $session->isPlayoff8()) {
         return $session->games()
@@ -2158,10 +2158,10 @@ private function canAdvanceStage(Session $session): bool
             ->where('status', '!=', 'completed')
             ->count() === 0;
     }
-    
+
     return false;
 }
- 
+
 
 
     /**

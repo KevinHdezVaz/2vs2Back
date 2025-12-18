@@ -5,6 +5,9 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Eloquent\Relations\BelongsTo; // ✅ AGREGAR ESTE IMPORT
+
 
 class Session extends Model
 {
@@ -37,8 +40,10 @@ class Session extends Model
         'progress_percentage' => 'float'
     ];
 
-    // ... (mantener todos los métodos existentes)
-
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
     /**
      * ✅ NUEVO: Generar código de sesión único (6 caracteres)
      */
@@ -49,7 +54,7 @@ class Session extends Model
             $numbers = substr(str_shuffle('123456789'), 0, 4);
             $code = $letters . $numbers;
         } while (self::where('session_code', $code)->exists());
-        
+
         return $code;
     }
 
@@ -61,7 +66,7 @@ class Session extends Model
         return str_pad((string) random_int(10, 99), 2, '0', STR_PAD_LEFT);
     }
 
-    
+
     /**
      * ✅ NUEVO: Validar código de verificación
      */
@@ -87,7 +92,7 @@ class Session extends Model
             $this->status = 'active';
             $this->started_at = now();
             $this->save();
-            
+
             Log::info('Session activated', [
                 'session_id' => $this->id,
                 'session_code' => $this->session_code,
@@ -142,44 +147,62 @@ class Session extends Model
                 ->where('status', '!=', 'completed')
                 ->count() === 0;
         }
-        
+
         if ($this->isPlayoff4() || $this->isPlayoff8()) {
             $regularGamesComplete = $this->games()
                 ->where('is_playoff_game', false)
                 ->where('status', '!=', 'completed')
                 ->count() === 0;
-                
+
             $noPlayoffGames = !$this->games()
                 ->where('is_playoff_game', true)
                 ->exists();
-                
+
             return $regularGamesComplete && $noPlayoffGames;
         }
-        
+
         return false;
     }
 
-    public function updateRankings(): void
-    {
-        $players = $this->players()->get();
-        $rankedPlayers = $players->sortByDesc('current_rating')->values();
 
-        foreach ($rankedPlayers as $index => $player) {
-            $player->current_rank = $index + 1;
-            $player->save();
-        }
+public function updateRankings(): void
+{
+    // ✅ Query optimizada - SIN display_name (no existe en la tabla)
+    $players = $this->players()
+        ->select('id', 'current_rating') // ← QUITAR 'display_name'
+        ->orderBy('current_rating', 'desc')
+        ->get();
 
-        Log::info('Rankings simplificados actualizados', [
-            'session_id' => $this->id,
-            'top_3_players' => $rankedPlayers->take(3)->map(function($p) {
-                return [
-                    'name' => $p->display_name,
-                    'rating' => $p->current_rating,
-                    'rank' => $p->current_rank
-                ];
-            })->toArray()
-        ]);
+    if ($players->isEmpty()) {
+        return;
     }
+
+    // ✅ Preparar bulk update con CASE
+    $cases = [];
+    $ids = [];
+
+    foreach ($players as $index => $player) {
+        $rank = $index + 1;
+        $cases[] = "WHEN {$player->id} THEN {$rank}";
+        $ids[] = $player->id;
+    }
+
+    $casesSql = implode(' ', $cases);
+    $idsSql = implode(',', $ids);
+
+    // ✅ 1 solo UPDATE para todos los jugadores
+    \DB::update("
+        UPDATE players
+        SET current_rank = CASE id {$casesSql} END,
+            updated_at = NOW()
+        WHERE id IN ({$idsSql})
+    ");
+
+    Log::info('Rankings updated', [
+        'session_id' => $this->id,
+        'players_count' => count($ids)
+    ]);
+}
 
     public function isReadyToFinalize(): bool
     {
@@ -192,11 +215,11 @@ class Session extends Model
             if ($this->current_stage < 3) {
                 return false;
             }
-            
+
             $pendingActiveGames = $this->games()
                 ->whereIn('status', ['pending', 'active'])
                 ->count();
-            
+
             return $pendingActiveGames === 0;
         }
 
@@ -205,65 +228,68 @@ class Session extends Model
                 ->where('is_playoff_game', true)
                 ->where('playoff_round', 'gold')
                 ->first();
-                
+
             $bronzeGame = $this->games()
                 ->where('is_playoff_game', true)
                 ->where('playoff_round', 'bronze')
                 ->first();
-            
+
             if (!$goldGame || !$bronzeGame) {
                 return false;
             }
-            
+
             if ($goldGame->status !== 'completed' || $bronzeGame->status !== 'completed') {
                 return false;
             }
         }
-        
+
         if ($this->isPlayoff4()) {
             $finalGame = $this->games()
                 ->where('is_playoff_game', true)
                 ->where('playoff_round', 'final')
                 ->first();
-            
+
             if (!$finalGame) {
                 return false;
             }
-            
+
             if ($finalGame->status !== 'completed') {
                 return false;
             }
         }
-        
+
         $pendingActiveGames = $this->games()
             ->whereIn('status', ['pending', 'active'])
             ->count();
-        
+
         return $pendingActiveGames === 0;
     }
 
-    public function updateProgress(): void
-    {
-        $completedGames = $this->games()->where('status', 'completed')->count();
-        $totalGames = $this->calculateTotalExpectedGames();
-        
-        if ($totalGames > 0) {
-            $this->progress_percentage = ($completedGames / $totalGames) * 100;
-        } else {
-            $this->progress_percentage = 0;
-        }
-        
-        $this->total_games = $totalGames;
-        $this->save();
-        
-        Log::info('Progress updated', [
-            'session_id' => $this->id,
-            'session_type' => $this->session_type,
-            'completed_games' => $completedGames,
-            'total_expected_games' => $totalGames,
-            'progress_percentage' => round($this->progress_percentage, 2)
-        ]);
+  public function updateProgress(): void
+{
+    // ✅ Cachear total_games si ya se calculó
+    if ($this->total_games === null || $this->total_games === 0) {
+        $this->total_games = $this->calculateTotalExpectedGames();
     }
+
+    // ✅ Query única
+    $completedGames = $this->games()
+        ->where('status', 'completed')
+        ->count();
+
+    if ($this->total_games > 0) {
+        $this->progress_percentage = ($completedGames / $this->total_games) * 100;
+    } else {
+        $this->progress_percentage = 0;
+    }
+
+    // ✅ updateQuietly evita eventos (más rápido)
+    $this->updateQuietly([
+        'progress_percentage' => round($this->progress_percentage, 2),
+        'total_games' => $this->total_games
+    ]);
+}
+
 
     private function calculateTotalExpectedGames(): int
 {
@@ -272,52 +298,52 @@ class Session extends Model
         $regularGames = $this->games()
             ->where('is_playoff_game', false)
             ->count();
-        
+
         // Qualifier + Final = 2 juegos de playoff
         return $regularGames + 2;
     }
-    
+
     // ✅ P8 NORMAL
     if ($this->isPlayoff8()) {
         $regularGames = $this->games()
             ->where('is_playoff_game', false)
             ->count();
-        
+
         // 2 Semifinals + Gold + Bronze = 4 juegos de playoff
         return $regularGames + 4;
     }
-    
+
     // ✅ P4 - CORREGIDO: Verificar si tiene Bronze match (2+ canchas)
     if ($this->isPlayoff4()) {
         $regularGames = $this->games()
             ->where('is_playoff_game', false)
             ->count();
-        
+
         // ✅ VERIFICAR SI EXISTE BRONZE MATCH
         $hasBronzeMatch = $this->games()
             ->where('is_playoff_game', true)
             ->where('playoff_round', 'bronze')
             ->exists();
-        
+
         // Gold (siempre) + Bronze (si hay 2+ canchas)
         $playoffGames = $hasBronzeMatch ? 2 : 1;
-        
+
         return $regularGames + $playoffGames;
     }
-    
+
     // ✅ TOURNAMENT
     if ($this->isTournament()) {
         $template = $this->loadTemplateForSession();
-        
+
         if ($template && isset($template['blocks'])) {
             $totalGames = 0;
-            
+
             foreach ($template['blocks'] as $block) {
                 foreach ($block['rounds'] as $round) {
                     $totalGames += count($round['courts']);
                 }
             }
-            
+
             Log::info('📊 Tournament total games from template', [
                 'session_id' => $this->id,
                 'template_name' => $this->getTemplateName(),
@@ -325,18 +351,18 @@ class Session extends Model
                 'current_stage' => $this->current_stage,
                 'blocks_count' => count($template['blocks'])
             ]);
-            
+
             return $totalGames;
         }
-        
+
         Log::warning('⚠️ Template not found for tournament - using current games count', [
             'session_id' => $this->id,
             'template_name' => $this->getTemplateName()
         ]);
-        
+
         return $this->games()->count();
     }
-    
+
     // ✅ SIMPLE / OPTIMIZED
     return $this->games()->count();
 }
@@ -359,7 +385,7 @@ class Session extends Model
         try {
             $content = file_get_contents($path);
             $template = json_decode($content, true);
-            
+
             if (json_last_error() !== JSON_ERROR_NONE) {
                 Log::error('Error decoding template JSON', [
                     'session_id' => $this->id,
@@ -368,7 +394,7 @@ class Session extends Model
                 ]);
                 return null;
             }
-            
+
             return $template;
         } catch (\Exception $e) {
             Log::error('Error loading template', [
@@ -396,7 +422,7 @@ class Session extends Model
         if (!$this->isPlayoff8()) {
             return false;
         }
-        
+
         $specialTemplates = ['1C2H6P-P8', '1C2H7P-P8'];
         $templateName = sprintf(
             '%dC%dH%dP-%s',
@@ -405,7 +431,7 @@ class Session extends Model
             $this->number_of_players,
             $this->session_type
         );
-        
+
         return in_array($templateName, $specialTemplates);
     }
 }
