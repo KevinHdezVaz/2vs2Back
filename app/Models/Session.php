@@ -265,20 +265,22 @@ public function updateRankings(): void
         return $pendingActiveGames === 0;
     }
 
-  public function updateProgress(): void
+ 
+public function updateProgress(): void
 {
     // ✅ Cachear total_games si ya se calculó
     if ($this->total_games === null || $this->total_games === 0) {
         $this->total_games = $this->calculateTotalExpectedGames();
     }
 
-    // ✅ Query única
-    $completedGames = $this->games()
-        ->where('status', 'completed')
+    // ✅ CAMBIO CLAVE: Contar "completed" + "cancelled"
+    // Los juegos "cancelled" son aquellos que se saltaron al avanzar etapa
+    $effectiveCompletedGames = $this->games()
+        ->whereIn('status', ['completed', 'cancelled']) // ← AGREGADO 'cancelled'
         ->count();
 
     if ($this->total_games > 0) {
-        $this->progress_percentage = ($completedGames / $this->total_games) * 100;
+        $this->progress_percentage = ($effectiveCompletedGames / $this->total_games) * 100;
     } else {
         $this->progress_percentage = 0;
     }
@@ -288,8 +290,17 @@ public function updateRankings(): void
         'progress_percentage' => round($this->progress_percentage, 2),
         'total_games' => $this->total_games
     ]);
-}
 
+    // ✅ LOG para debugging
+    \Log::info('📊 Progress updated', [
+        'session_id' => $this->id,
+        'completed' => $this->games()->where('status', 'completed')->count(),
+        'cancelled' => $this->games()->where('status', 'cancelled')->count(),
+        'effective_completed' => $effectiveCompletedGames,
+        'total_games' => $this->total_games,
+        'progress_percentage' => round($this->progress_percentage, 2)
+    ]);
+}
 
     private function calculateTotalExpectedGames(): int
 {

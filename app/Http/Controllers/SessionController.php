@@ -1527,19 +1527,23 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
 
             Log::info('📊 Estado ANTES de avanzar stage', $beforeState);
 
-            $cancelledGames = $session->games()
+            // ✅✅✅ CAMBIO CLAVE: CANCELAR en lugar de eliminar ✅✅✅
+            $gamesToCancel = $session->games()
                 ->where('stage', $session->current_stage)
                 ->where('status', 'pending')
                 ->get();
 
-            foreach ($cancelledGames as $game) {
-                $game->status = 'cancelled';
-                $game->court_id = null;
+            $cancelledCount = 0;
+            foreach ($gamesToCancel as $game) {
+                $game->status = 'cancelled'; // ✅ Marcar como cancelled
+                $game->court_id = null;      // ✅ Liberar cancha
                 $game->save();
+                $cancelledCount++;
             }
 
-            Log::info('🗑️ Juegos pendientes cancelados', [
-                'cancelled_count' => $cancelledGames->count()
+            Log::info('🗑️ Juegos pendientes CANCELADOS (no eliminados)', [
+                'cancelled_count' => $cancelledCount,
+                'will_count_for_progress' => true // ← Nuevo indicador
             ]);
 
             $session->updateRankings();
@@ -1575,6 +1579,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
                 'new_games_count' => $newGames->count()
             ]);
 
+            // ✅ ACTUALIZAR PROGRESO (ahora contará los cancelled)
             $session->updateProgress();
 
             $afterState = [
@@ -1584,6 +1589,9 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
                     ->where('stage', $session->current_stage)
                     ->where('status', 'pending')
                     ->count(),
+                'cancelled_games' => $session->games()
+                    ->where('status', 'cancelled')
+                    ->count(), // ← Nuevo
             ];
 
             Log::info('✅ Avance a Stage ' . $session->current_stage . ' completado', [
@@ -1597,7 +1605,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
                 'message' => "Advanced to Stage {$session->current_stage} successfully!",
                 'new_stage' => $session->current_stage,
                 'new_games_count' => $newGames->count(),
-                'cancelled_games' => $cancelledGames->count(),
+                'cancelled_games' => $cancelledCount,
                 'total_games' => $session->games()->count()
             ]);
         }
@@ -1618,15 +1626,25 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             'playoff_games' => $session->games()->where('is_playoff_game', true)->count(),
         ];
 
-        Log::info('📊 Estado ANTES de eliminar', $beforeState);
+        Log::info('📊 Estado ANTES de cancelar juegos', $beforeState);
 
-        $deletedCount = $session->games()
+        // ✅✅✅ CAMBIO CLAVE: CANCELAR en lugar de eliminar ✅✅✅
+        $gamesToCancel = $session->games()
             ->whereIn('status', ['pending', 'active'])
-            ->delete();
+            ->get();
 
-        Log::info('🗑️ Juegos eliminados', [
-            'deleted_count' => $deletedCount,
-            'remaining_games' => $session->games()->count()
+        $cancelledCount = 0;
+        foreach ($gamesToCancel as $game) {
+            $game->status = 'cancelled'; // ✅ Marcar como cancelled
+            $game->court_id = null;      // ✅ Liberar cancha
+            $game->save();
+            $cancelledCount++;
+        }
+
+        Log::info('🗑️ Juegos CANCELADOS antes de playoffs (no eliminados)', [
+            'cancelled_count' => $cancelledCount,
+            'remaining_games' => $session->games()->count(),
+            'will_count_for_progress' => true // ← Nuevo indicador
         ]);
 
         // ✅ IMPORTANTE: Actualizar rankings UNA SOLA VEZ aquí
@@ -1677,12 +1695,14 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             'games_in_queue' => $newGames->count() - $gamesWithCourts
         ]);
 
+        // ✅ ACTUALIZAR PROGRESO (ahora contará los cancelled)
         $session->updateProgress();
 
         $afterState = [
             'total_games' => $session->games()->count(),
             'pending_games' => $session->games()->where('status', 'pending')->count(),
             'completed_games' => $session->games()->where('status', 'completed')->count(),
+            'cancelled_games' => $session->games()->where('status', 'cancelled')->count(), // ← Nuevo
             'playoff_games' => $session->games()->where('is_playoff_game', true)->count(),
         ];
 
@@ -1698,7 +1718,7 @@ public function autoGenerateFinalsIfReady(Session $session): JsonResponse
             'new_games_count' => $newGames->count(),
             'games_with_courts' => $gamesWithCourts,
             'games_in_queue' => $newGames->count() - $gamesWithCourts,
-            'previous_games_deleted' => $deletedCount,
+            'previous_games_cancelled' => $cancelledCount, // ← Cambio de nombre
             'total_games' => $session->games()->count()
         ]);
 
@@ -1889,86 +1909,134 @@ private function isSpecialP8Complete(Session $session): bool
     return $hasFinal;
 }
 
+
 /**
  * Generar finals de P8 manualmente
  */
-/**
- * Generar finals de P8 manualmente
- */
-  public function generateP8Finals(Session $session): JsonResponse
-    {
-        if ($session->user_id !== auth()->id()) {
-            return response()->json(['message' => 'No autorizado'], 403);
-        }
+public function generateP8Finals(Session $session): JsonResponse
+{
+    if ($session->user_id !== auth()->id()) {
+        return response()->json(['message' => 'No autorizado'], 403);
+    }
+    if (!$session->isPlayoff8()) {
+        return response()->json([
+            'message' => 'Only P8 sessions can generate finals'
+        ], 422);
+    }
 
-        if (!$session->isPlayoff8()) {
-            return response()->json([
-                'message' => 'Only P8 sessions can generate finals'
-            ], 422);
-        }
-
-        // Verificar que las semifinals estén completadas
-        $semifinals = $session->games()
-            ->where('is_playoff_game', true)
-            ->where('playoff_round', 'semifinal')
-            ->get();
-
-        if ($semifinals->count() !== 2) {
-            return response()->json([
-                'message' => 'Both semifinals must exist'
-            ], 422);
-        }
-
-        if ($semifinals->where('status', 'completed')->count() !== 2) {
-            return response()->json([
-                'message' => 'Both semifinals must be completed'
-            ], 422);
-        }
-
-        // Verificar que no existan finals ya
-        $existingFinals = $session->games()
-            ->where('is_playoff_game', true)
-            ->whereIn('playoff_round', ['gold', 'bronze'])
-            ->exists();
-
-        if ($existingFinals) {
-            return response()->json([
-                'message' => 'Finals have already been generated'
-            ], 422);
-        }
-
-        // Limpiar juegos pending antes de generar finals
-        $pendingCount = $session->games()->where('status', 'pending')->count();
-        if ($pendingCount > 0) {
-            $deletedCount = $session->games()->where('status', 'pending')->delete();
-
-            Log::info('Pending games deleted before generating P8 finals', [
-                'session_id' => $session->id,
-                'deleted_count' => $deletedCount
-            ]);
-        }
-
-        // Generar finals
-        $games = $this->gameGenerator->generateP8Finals($session, $semifinals);
-
-        Log::info('P8 finals generated successfully', [
-            'session_id' => $session->id,
-            'games_generated' => $games->count(),
-            'previous_pending_deleted' => $pendingCount
+    // ✅ NUEVO: Detectar caso especial ANTES de cualquier validación
+    if ($this->gameGenerator->isSpecialP8Template($session)) {
+        Log::info('Detectado P8 especial - generando Final directamente', [
+            'session_id' => $session->id
         ]);
 
-        // ✅ CORREGIDO: Obtener juegos frescos con relaciones
+        // Verificar que el Qualifier esté completado (el service ya lo hace, pero agregamos log)
+        $qualifier = $session->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'qualifier')
+            ->where('status', 'completed')
+            ->first();
+
+        if (!$qualifier) {
+            return response()->json([
+                'message' => 'The qualifier game must be completed first'
+            ], 422);
+        }
+
+        // Verificar que no exista ya la Final
+        $existingFinal = $session->games()
+            ->where('is_playoff_game', true)
+            ->where('playoff_round', 'final')
+            ->exists();
+
+        if ($existingFinal) {
+            return response()->json([
+                'message' => 'Final has already been generated'
+            ], 422);
+        }
+
+        // Generar la Final especial
+        $games = $this->gameGenerator->generateSpecialP8Final($session);
+
+        Log::info('P8 especial Final generada correctamente', [
+            'session_id' => $session->id,
+            'games_generated' => $games->count()
+        ]);
+
+        // Cargar relaciones para el response
         $gameIds = $games->pluck('id');
         $gamesWithRelations = Game::whereIn('id', $gameIds)
             ->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
             ->get();
 
         return response()->json([
-            'message' => 'Finals generated successfully',
-            'games' => $gamesWithRelations,
-            'previous_pending_deleted' => $pendingCount
+            'message' => 'Final generated successfully',
+            'games' => $gamesWithRelations
         ]);
     }
+
+    // ✅ CASO NORMAL: Validaciones existentes
+    $semifinals = $session->games()
+        ->where('is_playoff_game', true)
+        ->where('playoff_round', 'semifinal')
+        ->get();
+
+    if ($semifinals->count() !== 2) {
+        return response()->json([
+            'message' => 'Both semifinals must exist'
+        ], 422);
+    }
+
+    if ($semifinals->where('status', 'completed')->count() !== 2) {
+        return response()->json([
+            'message' => 'Both semifinals must be completed'
+        ], 422);
+    }
+
+    // Verificar que no existan finals ya
+    $existingFinals = $session->games()
+        ->where('is_playoff_game', true)
+        ->whereIn('playoff_round', ['gold', 'bronze'])
+        ->exists();
+
+    if ($existingFinals) {
+        return response()->json([
+            'message' => 'Finals have already been generated'
+        ], 422);
+    }
+
+    // Limpiar juegos pending (si los hay)
+    $pendingCount = $session->games()->where('status', 'pending')->count();
+    if ($pendingCount > 0) {
+        $deletedCount = $session->games()->where('status', 'pending')->delete();
+        Log::info('Pending games deleted before generating P8 finals', [
+            'session_id' => $session->id,
+            'deleted_count' => $deletedCount
+        ]);
+    }
+
+    // Generar finals normales
+    $games = $this->gameGenerator->generateP8Finals($session, $semifinals);
+
+    Log::info('P8 normales finals generados correctamente', [
+        'session_id' => $session->id,
+        'games_generated' => $games->count(),
+        'previous_pending_deleted' => $pendingCount
+    ]);
+
+    // Cargar relaciones
+    $gameIds = $games->pluck('id');
+    $gamesWithRelations = Game::whereIn('id', $gameIds)
+        ->with(['team1Player1', 'team1Player2', 'team2Player1', 'team2Player2', 'court'])
+        ->get();
+
+    return response()->json([
+        'message' => 'Finals generated successfully',
+        'games' => $gamesWithRelations,
+        'previous_pending_deleted' => $pendingCount
+    ]);
+}
+
 
 public function generateNextStageGames(Session $session): Collection
 {

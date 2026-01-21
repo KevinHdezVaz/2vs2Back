@@ -579,8 +579,7 @@ class GameGeneratorService
     /**
      * ✅ NUEVO: Detectar templates especiales de P8 con menos de 8 jugadores
      */
-    private function isSpecialP8Template(Session $session): bool
-    {
+public function isSpecialP8Template(Session $session): bool    {
         $specialTemplates = [
             '1C2H6P-P8',
             '1C2H7P-P8', // Para el futuro

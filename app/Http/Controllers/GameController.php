@@ -785,68 +785,66 @@ public function getPrimaryActiveGame(Session $session): JsonResponse
         $player->save();
     }
 
-     private function reorganizeGameQueue($session)
-    {
-        // ✅ EARLY RETURN: Si no hay juegos pendientes, salir
-        $pendingCount = $session->games()->where('status', 'pending')->count();
+    private function reorganizeGameQueue($session)
+{
+    // ✅ EARLY RETURN: Si no hay juegos pendientes, salir
+    $pendingCount = $session->games()->where('status', 'pending')->count();
 
-        if ($pendingCount === 0) {
-            Log::debug('No pending games to reorganize', ['session_id' => $session->id]);
-            return;
-        }
-
-        Log::info('🔄 Reorganizing game queue', [
-            'session_id' => $session->id,
-            'pending_count' => $pendingCount
-        ]);
-
-        // Obtener juegos pendientes
-        $pendingGames = $session->games()
-            ->where('status', 'pending')
-            ->orderBy('game_number')
-            ->get();
-
-        // Obtener canchas disponibles
-        $availableCourts = $session->courts()
-            ->where('status', 'available')
-            ->orderBy('court_number', 'asc')
-            ->get();
-
-        // ✅ EARLY RETURN: Si no hay canchas disponibles, salir
-        if ($availableCourts->isEmpty()) {
-            Log::debug('No available courts', ['session_id' => $session->id]);
-            return;
-        }
-
-        // ✅ BULK UPDATE: Limpiar asignaciones de canchas en 1 query
-        Game::whereIn('id', $pendingGames->pluck('id'))
-            ->update(['court_id' => null]);
-
-        Log::debug('Cleared court assignments', [
-            'games_count' => $pendingGames->count()
-        ]);
-
-        // Asignar canchas a los primeros juegos
-        $gamesToAssign = $pendingGames->take($availableCourts->count());
-
-        foreach ($gamesToAssign as $index => $game) {
-            if (isset($availableCourts[$index])) {
-                $game->court_id = $availableCourts[$index]->id;
-                $game->save();
-
-                Log::debug('Assigned court to game', [
-                    'game_id' => $game->id,
-                    'court_id' => $availableCourts[$index]->id
-                ]);
-            }
-        }
-
-        Log::info('✅ Queue reorganized', [
-            'session_id' => $session->id,
-            'games_assigned' => $gamesToAssign->count()
-        ]);
+    if ($pendingCount === 0) {
+        Log::debug('No pending games to reorganize', ['session_id' => $session->id]);
+        return;
     }
 
+    Log::info('🔄 Reorganizing game queue', [
+        'session_id' => $session->id,
+        'pending_count' => $pendingCount
+    ]);
+
+    // Obtener juegos pendientes SIN cancha asignada
+    $gamesWithoutCourt = $session->games()
+        ->where('status', 'pending')
+        ->whereNull('court_id') // ← Solo juegos sin cancha
+        ->orderBy('game_number')
+        ->get();
+
+    // Obtener canchas disponibles
+    $availableCourts = $session->courts()
+        ->where('status', 'available')
+        ->orderBy('court_number', 'asc')
+        ->get();
+
+    // ✅ EARLY RETURN: Si no hay canchas disponibles, salir
+    if ($availableCourts->isEmpty()) {
+        Log::debug('No available courts', ['session_id' => $session->id]);
+        return;
+    }
+
+    Log::debug('🔍 Games without court assignment', [
+        'count' => $gamesWithoutCourt->count(),
+        'available_courts' => $availableCourts->count()
+    ]);
+
+    // ✅ ASIGNAR canchas SOLO a juegos que NO tienen cancha
+    $gamesToAssign = $gamesWithoutCourt->take($availableCourts->count());
+
+    foreach ($gamesToAssign as $index => $game) {
+        if (isset($availableCourts[$index])) {
+            $game->court_id = $availableCourts[$index]->id;
+            $game->save();
+
+            Log::debug('✅ Assigned court to game', [
+                'game_number' => $game->game_number,
+                'court_id' => $availableCourts[$index]->id,
+                'court_name' => $availableCourts[$index]->court_name
+            ]);
+        }
+    }
+
+    Log::info('✅ Queue reorganized', [
+        'session_id' => $session->id,
+        'games_assigned' => $gamesToAssign->count()
+    ]);
+}
 
 
   private function moveNextGameToActive(Session $session): void
